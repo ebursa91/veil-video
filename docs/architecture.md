@@ -36,9 +36,11 @@ flowchart LR
 | `pipeline` | Frame processing, progress callbacks, encoding, cancellation, subprocess lifecycle. |
 | `static` | Accessible upload, progress, job actions, playback, and download. |
 
-Uploads receive generated job IDs. The API accepts files rather than paths or remote URLs. Sources stay private; preview and download require a valid session and a completed job.
+Uploads receive generated job IDs. The API accepts files rather than paths or remote URLs. Sources stay private; edited snapshots and finished exports require a valid session.
 
 The worker processes one job at a time and reports backend, stage, frames, speed, progress, and estimated time remaining through SSE. The UI polls if SSE fails. Upload and processing progress are separate. SQLite preserves job history; an interrupted encode becomes a failed job and must be uploaded again.
+
+After a fully affected frame is written to the encoder pipe, an optional callback captures a JPEG at most 640 pixels per edge, throttled to about once a second. Only the latest JPEG stays in application memory; SQLite stores its frame number and video timestamp. An authenticated, uncached endpoint serves it while the job is processing. Cancellation and terminal states clear the snapshot. The browser limits image requests to one at a time and pauses them when hidden.
 
 Within a job, a single prefetch worker reads and detects the next frame while the current frame is masked and encoded. Tracking and output stay in source order. Only one next frame is buffered; large frames use the serial path when two BGR buffers would exceed 128 MiB. FFmpeg decode and filter threads are bounded by available CPU resources.
 

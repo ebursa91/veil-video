@@ -66,6 +66,8 @@ class Store:
             "message": "Waiting for the video worker",
             "error": None,
             "result": None,
+            "preview_frame": None,
+            "preview_time": None,
         }
         with self.connection() as db:
             db.execute(

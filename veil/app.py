@@ -1,4 +1,4 @@
-"""HTTP interface. Originals stay private; only finished exports can be streamed."""
+"""Authenticated exports and processed-frame previews. Originals stay private."""
 
 import asyncio
 import json
@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -274,6 +274,21 @@ def create_app(settings: Settings | None = None, *, start_worker: bool = True) -
     @app.get("/api/jobs/{job_id}")
     def job_info(job_id: str):
         return get_job(job_id)
+
+    @app.get("/api/jobs/{job_id}/live-preview")
+    def live_preview(job_id: str):
+        get_job(job_id)
+        preview = manager.get_preview(job_id)
+        if preview is None:
+            return Response(status_code=204)
+        return Response(
+            content=preview.jpeg,
+            media_type="image/jpeg",
+            headers={
+                "X-Preview-Frame": str(preview.frame),
+                "X-Preview-Time": f"{preview.time:.6f}",
+            },
+        )
 
     @app.post("/api/jobs/{job_id}/cancel")
     def cancel(job_id: str):

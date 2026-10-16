@@ -4,11 +4,19 @@ import fcntl
 import logging
 import shutil
 import threading
+from dataclasses import dataclass
 
 from veil.config import Settings
 from veil.store import Store
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class PreviewSnapshot:
+    jpeg: bytes
+    frame: int
+    time: float
 
 
 class JobManager:
@@ -21,6 +29,7 @@ class JobManager:
         self._cancel: dict[str, threading.Event] = {}
         self._thread: threading.Thread | None = None
         self._lease = None
+        self._previews: dict[str, PreviewSnapshot] = {}
 
     def start(self):
         self._lease = (self.settings.data_dir / "worker.lock").open("a")
@@ -37,6 +46,8 @@ class JobManager:
                     stage="failed",
                     error="Processing was interrupted by a server restart. Upload the video again.",
                     message="Interrupted by server restart",
+                    preview_frame=None,
+                    preview_time=None,
                 )
                 self._clean_output(job["id"])
         uploads = self.settings.data_dir / ".uploads"
@@ -79,7 +90,10 @@ class JobManager:
                 )
             if job["status"] == "processing":
                 self._cancel[job_id].set()
-                return self.store.update(job_id, message="Cancelling…")
+                self._previews.pop(job_id, None)
+                return self.store.update(
+                    job_id, message="Cancelling…", preview_frame=None, preview_time=None
+                )
             return job
 
     def delete(self, job_id: str) -> bool:
@@ -90,8 +104,16 @@ class JobManager:
             if job["status"] in {"queued", "processing"}:
                 raise ValueError("Cancel the job and wait for it to stop before deleting it.")
             shutil.rmtree(self.store.directory(job_id), ignore_errors=True)
+            self._previews.pop(job_id, None)
             self.store.delete(job_id)
             return True
+
+    def get_preview(self, job_id: str) -> PreviewSnapshot | None:
+        with self.lock:
+            job = self.store.get(job_id)
+            if not job or job["status"] != "processing":
+                return None
+            return self._previews.get(job_id)
 
     def _clean_output(self, job_id: str):
         directory = self.store.directory(job_id)
@@ -139,6 +161,29 @@ class JobManager:
                         current_job_id, **{k: v for k, v in fields.items() if k in allowed}
                     )
 
+                def preview(
+                    jpeg: bytes,
+                    frame: int,
+                    timestamp: float,
+                    current_job_id=job_id,
+                    current_event=event,
+                ):
+                    # Only the pipeline's fully processed JPEG crosses this boundary.
+                    # The latest image is transient; SQLite stores its version/time only.
+                    with self.lock:
+                        current = self.store.get(current_job_id)
+                        if (
+                            current_event.is_set()
+                            or self._stop.is_set()
+                            or not current
+                            or current["status"] != "processing"
+                        ):
+                            return
+                        self._previews[current_job_id] = PreviewSnapshot(jpeg, frame, timestamp)
+                        self.store.update(
+                            current_job_id, preview_frame=frame, preview_time=timestamp
+                        )
+
                 result = process_video(
                     directory / "source.bin",
                     directory / "blurred.mp4",
@@ -150,6 +195,7 @@ class JobManager:
                     model_path=self.settings.model_path,
                     effect=job.get("effect", "blur"),
                     expression_model_path=self.settings.expression_path,
+                    preview=preview,
                 )
                 with self.lock:
                     if event.is_set() or self._stop.is_set():
@@ -166,6 +212,8 @@ class JobManager:
                             message="Ready to review",
                             result=result,
                             eta_seconds=0,
+                            preview_frame=None,
+                            preview_time=None,
                         )
             except Exception as exc:
                 self._clean_output(job_id)
@@ -187,4 +235,6 @@ class JobManager:
                     )
             finally:
                 with self.lock:
+                    self._previews.pop(job_id, None)
+                    self.store.update(job_id, preview_frame=None, preview_time=None)
                     self._cancel.pop(job_id, None)

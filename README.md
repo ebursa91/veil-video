@@ -6,7 +6,7 @@ Self-hosted face blurring and emoji covers for video. Upload a clip, track progr
 - Choose blur or emoji covers. Blur is the default; emoji expressions are approximate.
 - Uses CUDA face detection and NVENC encoding when available; CPU mode is supported.
 - Exports SDR H.264/AAC video. HDR is converted to SDR; source metadata is removed.
-- Includes a persistent queue, cancellation, preview, download, and deletion.
+- Includes a persistent queue, live processed previews, cancellation, download, and deletion.
 - Stores media locally. No telemetry or cloud processing.
 
 **Review exports before sharing.** Detection can miss faces; audio and other identifying details remain.

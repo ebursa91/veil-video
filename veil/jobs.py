@@ -148,6 +148,8 @@ class JobManager:
                         current_event.is_set() or self._stop.is_set()
                     ),
                     model_path=self.settings.model_path,
+                    effect=job.get("effect", "blur"),
+                    expression_model_path=self.settings.expression_path,
                 )
                 with self.lock:
                     if event.is_set() or self._stop.is_set():

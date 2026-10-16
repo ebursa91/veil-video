@@ -19,6 +19,7 @@ jobs:
     timeout-minutes: 15
     env:
       VEIL_TEST_MODEL: .ci-model/yunet.onnx
+      VEIL_TEST_EXPRESSION_MODEL: .ci-model/expression.onnx
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
@@ -34,7 +35,14 @@ jobs:
         run: uv run ruff check .
       - name: Check formatting
         run: uv run ruff format --check .
-      - name: Prepare verified inference model
-        run: uv run python -c "import os; from pathlib import Path; from veil.model import ensure_model; ensure_model(Path(os.environ['VEIL_TEST_MODEL']))"
+      - name: Prepare verified inference models
+        run: |
+          uv run python - <<'PY'
+          import os
+          from pathlib import Path
+          from veil.model import ensure_expression_model, ensure_model
+          ensure_model(Path(os.environ['VEIL_TEST_MODEL']))
+          ensure_expression_model(Path(os.environ['VEIL_TEST_EXPRESSION_MODEL']))
+          PY
       - name: Test
         run: uv run pytest

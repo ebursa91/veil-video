@@ -493,3 +493,101 @@ def test_iphone_240fps_slow_motion_is_accepted(tmp_path, monkeypatch):
     assert probe(source)["fps"] == 240
     result = run_pipeline(source, tmp_path / "slowmo-output.mp4", monkeypatch)
     assert result["frames_processed"] == 24
+
+
+def test_emoji_classifies_original_then_draws_over_blur(source, tmp_path, monkeypatch):
+    from veil import emoji
+    from veil.detector import Face, Landmarks
+
+    class Detector(FakeDetector):
+        def detect_faces(self, frame):
+            return [Face((70, 35, 45, 45), Landmarks(*([(80, 50)] * 5)), 0.9)]
+
+    original_regions = []
+
+    class Classifier:
+        backend = "CPU"
+
+        def __init__(self, path, *, gpu):
+            assert not gpu
+
+        def classify_many(self, frame, faces, **kwargs):
+            original_regions.append(frame[40:75, 75:105].copy())
+            return []
+
+    class Tracker:
+        def __init__(self, fps, *, seed):
+            pass
+
+        def update(self, faces, expressions):
+            return ["overlay"]
+
+    drawn = []
+
+    def draw(frame, overlays):
+        assert overlays == ["overlay"]
+        # Inference saw the original; the renderer receives a masked image.
+        original = original_regions[len(drawn)]
+        assert np.abs(original.astype(float) - frame[40:75, 75:105].astype(float)).mean() > 10
+        drawn.append(True)
+        frame[50:65, 85:100] = (0, 220, 255)
+
+    monkeypatch.setattr(pipeline, "FaceDetector", Detector)
+    monkeypatch.setattr(pipeline, "ExpressionClassifier", Classifier)
+    monkeypatch.setattr(emoji, "EmojiTracker", Tracker)
+    monkeypatch.setattr(emoji, "draw_emojis", draw)
+    output = tmp_path / "emoji.mp4"
+    result = pipeline.process_video(
+        source,
+        output,
+        mode="cpu",
+        effect="emoji",
+        model_path=source,
+        progress=lambda _: None,
+        cancelled=lambda: False,
+    )
+    assert result["effect"] == "emoji"
+    assert len(drawn) == result["frames_with_faces"] == result["frames_processed"] == 10
+    assert probe(output)["has_audio"]
+    assert frames(output)[:, 55:60, 90:95, 1:].mean() > 180
+
+
+@pytest.mark.parametrize("failure", ["classifier", "renderer"])
+def test_emoji_failure_removes_partial_export(source, tmp_path, monkeypatch, failure):
+    from veil import emoji
+
+    class Detector(FakeDetector):
+        def detect_faces(self, frame):
+            return []
+
+    class Classifier:
+        backend = "CPU"
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def classify_many(self, frame, faces, **kwargs):
+            if failure == "classifier":
+                raise RuntimeError("expression failed")
+            return []
+
+    def draw(*args):
+        raise RuntimeError("renderer failed")
+
+    monkeypatch.setattr(pipeline, "FaceDetector", Detector)
+    monkeypatch.setattr(pipeline, "ExpressionClassifier", Classifier)
+    monkeypatch.setattr(emoji, "draw_emojis", draw)
+    output = tmp_path / "failed-emoji.mp4"
+    with pytest.raises(RuntimeError, match="failed"):
+        pipeline.process_video(
+            source,
+            output,
+            mode="cpu",
+            effect="emoji",
+            model_path=source,
+            progress=lambda _: None,
+            cancelled=lambda: False,
+        )
+    assert not output.exists()
+    assert not list(tmp_path.glob(".veil-*"))
+    assert not any(t.name.startswith("veil-prefetch") for t in threading.enumerate())

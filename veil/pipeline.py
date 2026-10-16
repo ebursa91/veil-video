@@ -1,4 +1,4 @@
-"""Streaming face blur jobs with bounded memory and cancellable FFmpeg pipes."""
+"""Streaming face effects with bounded memory and cancellable FFmpeg pipes."""
 
 import fcntl
 import os
@@ -16,6 +16,7 @@ from pathlib import Path
 import numpy as np
 
 from veil.detector import FaceDetector, MaskTracker, blur_faces
+from veil.expression import ExpressionClassifier
 from veil.media import INPUT_FORMATS, decode_filter, probe
 
 
@@ -241,12 +242,16 @@ def process_video(
     progress: Callable[[dict], None],
     cancelled: Callable[[], bool],
     model_path: Path,
+    effect: str = "blur",
+    expression_model_path: Path | None = None,
     prefetch: bool = True,
     decode_threads: int | None = None,
     filter_threads: int | None = None,
 ) -> dict:
     if mode not in {"auto", "gpu", "cpu"}:
         raise ValueError("Processing mode must be auto, gpu or cpu.")
+    if effect not in {"blur", "emoji"}:
+        raise ValueError("Face effect must be blur or emoji.")
     default_decode, default_filter = _decode_threads()
     decode_threads = default_decode if decode_threads is None else decode_threads
     filter_threads = default_filter if filter_threads is None else filter_threads
@@ -279,6 +284,30 @@ def process_video(
                 raise RuntimeError(f"GPU mode requires working NVENC: {reason}")
             fallback.append("NVENC unavailable; using CPU encoding.")
     backend = f"{detector.backend} + {'NVENC' if nvenc else 'libx264'}"
+    classifier = emoji_tracker = None
+    if effect == "emoji":
+        from veil.emoji import EmojiTracker, draw_emojis
+
+        expression_model_path = expression_model_path or Path(model_path).with_name(
+            "expression.onnx"
+        )
+        try:
+            classifier = ExpressionClassifier(expression_model_path, gpu=detector.backend == "CUDA")
+        except Exception as exc:
+            if mode != "auto" or detector.backend != "CUDA":
+                raise RuntimeError(f"Expression inference unavailable: {exc}") from exc
+            fallback.append("CUDA expression inference unavailable; using CPU expressions.")
+            classifier = ExpressionClassifier(expression_model_path, gpu=False)
+        backend = (
+            f"{detector.backend} faces / {classifier.backend} expressions + "
+            f"{'NVENC' if nvenc else 'libx264'}"
+        )
+        emoji_tracker = EmojiTracker(media["fps"], seed=output.parent.name)
+    activity = (
+        "Matching expressions and encoding face emojis."
+        if effect == "emoji"
+        else "Detecting faces and encoding masked frames."
+    )
     width, height, fps = media["width"], media["height"], media["fps"]
     total = max(1, round(media["duration"] * fps))
     tracker = MaskTracker(fps)
@@ -389,8 +418,7 @@ def process_video(
                         "backend": backend,
                         "total_frames": total,
                         "frames_processed": 0,
-                        "message": " ".join(fallback)
-                        or "Detecting faces and encoding masked frames.",
+                        "message": " ".join(fallback) or activity,
                     }
                 )
 
@@ -402,19 +430,33 @@ def process_video(
                     # The returned array owns the writable bytearray through its
                     # buffer reference; no full-frame copy or shared scratch buffer.
                     frame = np.frombuffer(raw, np.uint8).reshape(height, width, 3)
+                    if classifier is not None:
+                        faces = detector.detect_faces(frame)
+                        expressions = classifier.classify_many(
+                            frame, faces, check_cancel=lambda: _check_cancel(check_cancel)
+                        )
+                        return frame, (faces, expressions)
                     return frame, detector.detect(frame)
 
                 # At most the current and next frame are retained. Large frames
                 # stay serial when two BGR buffers would exceed 128 MiB.
                 overlap = prefetch and width * height * 3 * 2 <= 128 * 1024**2
                 with _prefetch_frames(read_and_detect, cancelled, enabled=overlap) as frames:
-                    for frame, boxes in frames:
+                    for frame, detections in frames:
                         if frame_count > (4 * 60 * 60 + 1) * fps:
                             raise ValueError("Decoded video exceeds the four-hour limit.")
+                        if emoji_tracker is not None:
+                            faces, expressions = detections
+                            boxes = [face.box for face in faces]
+                            overlays = emoji_tracker.update(faces, expressions)
+                        else:
+                            boxes = detections
                         masks = tracker.update(boxes)
                         if masks:
                             face_count += 1
                             blur_faces(frame, masks)
+                        if emoji_tracker is not None:
+                            draw_emojis(frame, overlays)
                         _write_frame(encoder.stdin, memoryview(frame).cast("B"), cancelled)
                         frame_count += 1
                         now = time.monotonic()
@@ -429,13 +471,13 @@ def process_video(
                                     "fps": round(speed, 1),
                                     "eta_seconds": max(0, round((total - frame_count) / speed)),
                                     "backend": backend,
-                                    "message": "Detecting faces and encoding masked frames.",
+                                    "message": activity,
                                 }
                             )
                             last_update = now
                         # Release the caller's frame before the generator starts
                         # another lookahead; otherwise three frames can coexist.
-                        del frame, boxes
+                        del frame, boxes, detections
                 _wait(decoder, cancelled)
                 encoder.stdin.close()
                 progress(
@@ -532,6 +574,7 @@ def process_video(
     return {
         "frames_processed": frame_count,
         "frames_with_faces": face_count,
+        "effect": effect,
         "backend": backend,
         "width": width,
         "height": height,

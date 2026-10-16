@@ -20,6 +20,8 @@
   const statuses = { queued: "Queued", processing: "Processing", completed: "Ready to review", failed: "Failed", cancelled: "Cancelled" };
   const stages = { probing: "Reading video", detecting: "Finding & blurring faces", encoding: "Encoding MP4", finalizing: "Finishing your video" };
   const modeHelp = { auto: "Uses GPU acceleration when available, with CPU fallback.", gpu: "Requires GPU face detection and NVIDIA video encoding.", cpu: "Processes entirely on the CPU. Usually takes longer." };
+  const effectHelp = { blur: "Expanded blur masks cover detected faces.", emoji: "Emojis follow position, tilt, and estimated expression. Blur stays underneath." };
+  function selectedEffect() { return document.querySelector('input[name="effect"]:checked')?.value || "blur"; }
 
   function announce(message) { $("live-status").textContent = message; }
   function showError(message) { $("workspace-error-text").textContent = message; $("workspace-error").hidden = false; announce(message); }
@@ -94,6 +96,8 @@
     state.jobs = [];
     state.system = null;
     state.preferredModeApplied = false;
+    document.querySelector('input[name="effect"][value="blur"]').checked = true;
+    $("effect-help").textContent = effectHelp.blur;
     selectFile(null);
     $("boot-screen").hidden = true;
     $("workspace").hidden = true;
@@ -133,6 +137,12 @@
       $("hardware-details-text").textContent = details;
       $("model-notice").hidden = system.model_ready !== false;
       $("model-notice").textContent = "The face detection model is missing. Run ‘veil init’ on this machine, then refresh.";
+      $("emoji-notice").hidden = system.emoji_ready !== false;
+      if (system.emoji_ready === false && selectedEffect() === "emoji" && !state.upload) {
+        document.querySelector('input[name="effect"][value="blur"]').checked = true;
+        $("effect-help").textContent = effectHelp.blur;
+        announce("Face emoji is unavailable. Blur is selected.");
+      }
       const max = Number(system.max_upload_bytes);
       $("file-limit").textContent = `iPhone videos, MOV, MP4 & more${max > 0 ? ` · Max ${size(max)}` : ""}`;
       const gpuInput = document.querySelector('input[name="mode"][value="gpu"]');
@@ -265,7 +275,7 @@
       card.name.textContent = job.filename || "Video";
       card.name.title = job.filename || "Video";
       const media = job.media || {};
-      const metadata = [size(job.source_bytes), duration(media.duration)];
+      const metadata = [job.effect === "emoji" ? "Face emoji" : "Blur", size(job.source_bytes), duration(media.duration)];
       if (media.width && media.height) metadata.push(`${media.width} × ${media.height}`);
       card.meta.textContent = metadata.filter(Boolean).join(" · ");
       card.status.textContent = statuses[job.status] || "Updating";
@@ -273,6 +283,7 @@
       card.processing.hidden = !active;
       const progress = percentage(job.progress);
       card.stage.textContent = job.status === "queued" ? "Waiting for the worker" : stages[job.stage] || "Processing video";
+      if (job.stage === "detecting" && job.effect === "emoji") card.stage.textContent = "Matching expressions & adding emoji";
       card.percent.textContent = job.status === "queued" ? "" : `${progress}%`;
       card.progress.value = progress;
       card.progress.setAttribute("aria-label", `${job.filename || "Video"}: ${card.stage.textContent}`);
@@ -298,8 +309,8 @@
       card.download.hidden = job.status !== "completed";
       card.previewToggle.hidden = job.status !== "completed";
       card.download.href = jobUrl(job.id, "download");
-      card.download.setAttribute("aria-label", `Download blurred ${job.filename || "video"} as MP4`);
-      card.previewToggle.setAttribute("aria-label", `Review blurred ${job.filename || "video"}`);
+      card.download.setAttribute("aria-label", `Download ${job.effect === "emoji" ? "face emoji" : "blurred"} edit of ${job.filename || "video"} as MP4`);
+      card.previewToggle.setAttribute("aria-label", `Review ${job.effect === "emoji" ? "face emoji" : "blurred"} edit of ${job.filename || "video"}`);
       if (job.status !== "completed" && !card.preview.hidden) {
         card.video.pause();
         card.preview.hidden = true;
@@ -345,15 +356,17 @@
 
   function updateUploadButton() {
     const uploading = Boolean(state.upload);
-    $("upload-button").disabled = uploading || !state.selectedFile || !state.system || state.system.model_ready === false;
+    const emoji = selectedEffect() === "emoji";
+    $("upload-button").disabled = uploading || !state.selectedFile || !state.system || state.system.model_ready === false || (emoji && state.system.emoji_ready === false);
     $("video-file").disabled = uploading;
     $("clear-file").disabled = uploading;
     $("drop-zone").classList.toggle("is-disabled", uploading);
-    $("upload-button-label").textContent = uploading ? "Uploading…" : "Blur faces";
+    $("upload-button-label").textContent = uploading ? "Uploading…" : emoji ? "Add face emoji" : "Blur faces";
     $("abort-upload").hidden = !uploading;
     for (const input of document.querySelectorAll('input[name="mode"]')) {
       input.disabled = uploading || (input.value === "gpu" && (!state.system?.gpu_available || !state.system?.nvenc_available));
     }
+    for (const input of document.querySelectorAll('input[name="effect"]')) input.disabled = uploading || (input.value === "emoji" && state.system?.emoji_ready === false);
   }
 
   function selectFile(file) {
@@ -388,6 +401,11 @@
   function uploadVideo(event) {
     event.preventDefault();
     if (!state.selectedFile || state.upload || !state.system || state.system.model_ready === false) return;
+    const effect = selectedEffect();
+    if (effect === "emoji" && state.system.emoji_ready === false) {
+      showError("Initialize the expression model on this machine before using Face emoji.");
+      return;
+    }
     if (Number(state.system.max_upload_bytes) > 0 && state.selectedFile.size > Number(state.system.max_upload_bytes)) {
       showError(`That video is too large. The upload limit is ${size(state.system.max_upload_bytes)}.`);
       return;
@@ -397,6 +415,7 @@
     const data = new FormData();
     data.append("file", file, file.name);
     data.append("mode", document.querySelector('input[name="mode"]:checked').value);
+    data.append("effect", effect);
     const xhr = new XMLHttpRequest();
     state.upload = xhr;
     xhr.open("POST", "/api/jobs");
@@ -420,7 +439,7 @@
       if (xhr.status === 401) { showLogin("Your session expired. Enter your password to continue."); return; }
       if (xhr.status >= 200 && xhr.status < 300) {
         selectFile(null);
-        announce(`${file.name} uploaded. Face blurring is queued.`);
+        announce(`${file.name} uploaded. ${effect === "emoji" ? "Face emoji" : "Face blurring"} is queued.`);
         loadJobs().then(() => {
           if (!state.authenticated) return;
           $("jobs-heading").setAttribute("tabindex", "-1");
@@ -467,6 +486,7 @@
   $("refresh-system").addEventListener("click", loadSystem);
   $("dismiss-error").addEventListener("click", dismissError);
   for (const input of document.querySelectorAll('input[name="mode"]')) input.addEventListener("change", updateModeHelp);
+  for (const input of document.querySelectorAll('input[name="effect"]')) input.addEventListener("change", () => { $("effect-help").textContent = effectHelp[selectedEffect()]; updateUploadButton(); });
   let dragDepth = 0;
   $("drop-zone").addEventListener("dragenter", (event) => { event.preventDefault(); dragDepth += 1; if (!state.upload) $("drop-zone").classList.add("is-dragover"); });
   $("drop-zone").addEventListener("dragover", (event) => { event.preventDefault(); if (event.dataTransfer) event.dataTransfer.dropEffect = state.upload ? "none" : "copy"; });

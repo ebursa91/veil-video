@@ -63,6 +63,7 @@ def test_queue_lifecycle_and_private_original(signed_in):
     job = response.json()
     assert job["status"] == "queued"
     assert job["filename"] == "iPhone.MOV"
+    assert job["effect"] == "blur"
     assert len(signed_in.get("/api/jobs").json()["jobs"]) == 1
     path = f"/api/jobs/{job['id']}"
     assert signed_in.get(path + "/download").status_code == 409
@@ -100,6 +101,45 @@ def test_upload_validation_and_limits(signed_in, settings):
         == 422
     )
     assert not list((settings.data_dir / ".uploads").glob("*"))
+
+
+def test_emoji_effect_requires_verified_model_and_persists_selection(
+    signed_in, settings, monkeypatch
+):
+    import veil.model
+
+    def submit(effect):
+        return signed_in.post(
+            "/api/jobs",
+            files={"file": ("phone.mov", b"video")},
+            data={"mode": "cpu", "effect": effect},
+        )
+
+    assert submit("unknown").status_code == 422
+    assert submit("emoji").status_code == 503
+    assert signed_in.get("/api/jobs").json()["jobs"] == []
+    monkeypatch.setattr(
+        veil.model, "verify_expression_model", lambda path: path == settings.expression_path
+    )
+    job = submit("emoji").json()
+    assert job["effect"] == "emoji"
+    assert signed_in.get(f"/api/jobs/{job['id']}").json()["effect"] == "emoji"
+    store = Store(settings.data_dir)
+    (store.directory(job["id"]) / "blurred.mp4").write_bytes(b"export")
+    store.update(job["id"], status="completed")
+    response = signed_in.get(f"/api/jobs/{job['id']}/download")
+    assert response.status_code == 200
+    assert "phone-emoji.mp4" in response.headers["content-disposition"]
+
+
+def test_system_reports_expression_model_readiness(signed_in, monkeypatch):
+    import veil.model
+    import veil.pipeline
+
+    monkeypatch.setattr(veil.pipeline, "capabilities", lambda _: {"gpu_available": False})
+    assert signed_in.get("/api/system").json()["emoji_ready"] is False
+    monkeypatch.setattr(veil.model, "verify_expression_model", lambda _: True)
+    assert signed_in.get("/api/system").json()["emoji_ready"] is True
 
 
 def test_chunked_limit(signed_in):
@@ -148,13 +188,15 @@ def test_worker_calls_pipeline_and_persists_result(settings, monkeypatch):
     monkeypatch.setattr(veil.media, "probe", lambda _: {"width": 20, "height": 20})
 
     def process(source, output, **kwargs):
+        assert kwargs["effect"] == "emoji"
+        assert kwargs["expression_model_path"] == settings.expression_path
         kwargs["progress"]({"stage": "detecting", "progress": 55, "frames_processed": 3})
         output.write_bytes(b"processed")
         return {"frames_with_faces": 3, "backend": "CPU"}
 
     monkeypatch.setattr(veil.pipeline, "process_video", process)
     store = Store(settings.data_dir)
-    job = store.create("phone.mov", 10, "cpu")
+    job = store.create("phone.mov", 10, "cpu", effect="emoji")
     directory = store.directory(job["id"])
     directory.mkdir()
     (directory / "source.bin").write_bytes(b"input")

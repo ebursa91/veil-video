@@ -35,7 +35,17 @@ class Store:
         finally:
             db.close()
 
-    def create(self, filename: str, size: int, mode: str, job_id: str | None = None) -> dict:
+    def create(
+        self,
+        filename: str,
+        size: int,
+        mode: str,
+        job_id: str | None = None,
+        *,
+        effect: str = "blur",
+    ) -> dict:
+        if effect not in {"blur", "emoji"}:
+            raise ValueError("Unknown face effect.")
         job = {
             "id": job_id or uuid.uuid4().hex,
             "filename": filename,
@@ -46,6 +56,7 @@ class Store:
             "updated_at": now(),
             "source_bytes": size,
             "mode": mode,
+            "effect": effect,
             "media": None,
             "frames_processed": 0,
             "total_frames": None,

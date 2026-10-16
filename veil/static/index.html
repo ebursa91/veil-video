@@ -22,6 +22,8 @@
       <symbol id="icon-chip" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4m6-4v4M9 18v4m6-4v4M2 9h4m-4 6h4m12-6h4m-4 6h4"/><rect x="9" y="9" width="6" height="6" rx="1"/></symbol>
       <symbol id="icon-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10v1"/></symbol>
       <symbol id="icon-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></symbol>
+      <symbol id="icon-emoji" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8 9h.01M16 9h.01M8 14q4 5 8 0"/></symbol>
+      <symbol id="icon-blur" viewBox="0 0 24 24"><circle cx="9" cy="9" r="5"/><circle cx="15" cy="9" r="5"/><circle cx="9" cy="15" r="5"/><circle cx="15" cy="15" r="5"/></symbol>
     </svg>
 
     <div id="boot-screen" class="boot-screen" role="status">Opening your workspace<span class="loading-dots" aria-hidden="true">…</span></div>
@@ -72,6 +74,8 @@
                   <p id="file-limit" class="file-limit">iPhone videos, MOV, MP4 &amp; more</p>
                 </div>
                 <div id="selected-file" class="selected-file" hidden><svg class="icon" aria-hidden="true"><use href="#icon-video"/></svg><div><span id="selected-filename" class="selected-filename"></span><span id="selected-size" class="selected-size"></span></div><button id="clear-file" class="clear-file" type="button" aria-label="Remove selected video">×</button></div>
+
+                <fieldset class="mode-fieldset effect-fieldset"><legend class="field-label">Face effect</legend><div class="mode-options effect-options"><label class="mode-option"><input type="radio" name="effect" value="blur" checked aria-describedby="effect-help"><span><svg class="icon" aria-hidden="true"><use href="#icon-blur"/></svg>Blur</span></label><label class="mode-option"><input type="radio" name="effect" value="emoji" aria-describedby="effect-help emoji-notice"><span><svg class="icon" aria-hidden="true"><use href="#icon-emoji"/></svg>Face emoji</span></label></div><p id="effect-help" class="field-help">Expanded blur masks cover detected faces.</p><p id="emoji-notice" class="model-notice" hidden>Face emoji needs the expression model. Run ‘veil init’ on this machine, then refresh.</p></fieldset>
 
                 <fieldset class="mode-fieldset"><legend class="field-label">Processing</legend><div class="mode-options"><label class="mode-option"><input type="radio" name="mode" value="auto" checked><span>Automatic</span></label><label class="mode-option"><input type="radio" name="mode" value="gpu"><span>GPU</span></label><label class="mode-option"><input type="radio" name="mode" value="cpu"><span>CPU</span></label></div><p id="mode-help" class="field-help">Uses GPU acceleration when available, with CPU fallback.</p></fieldset>
 

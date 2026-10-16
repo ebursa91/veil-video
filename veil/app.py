@@ -186,6 +186,8 @@ def create_app(settings: Settings | None = None, *, start_worker: bool = True) -
 
     @app.get("/api/system")
     async def system_info():
+        from veil.model import verify_expression_model
+
         async with system_lock:
             from veil.pipeline import capabilities
 
@@ -195,6 +197,9 @@ def create_app(settings: Settings | None = None, *, start_worker: bool = True) -
             "max_upload_bytes": settings.max_upload_bytes,
             "model_ready": settings.model_path.is_file(),
             "default_mode": settings.mode,
+            "emoji_ready": await asyncio.to_thread(
+                verify_expression_model, settings.expression_path
+            ),
         }
 
     @app.get("/api/jobs")
@@ -211,7 +216,7 @@ def create_app(settings: Settings | None = None, *, start_worker: bool = True) -
             if not settings.model_path.is_file():
                 raise HTTPException(503, "Face model missing. Run 'veil init' on the server first.")
             # Parsing happens only after authentication, size and queue checks.
-            async with request.form(max_files=1, max_fields=1, max_part_size=8192) as form:
+            async with request.form(max_files=1, max_fields=2, max_part_size=8192) as form:
                 file = form.get("file")
                 if not isinstance(file, UploadFile):
                     # Starlette constructs its base UploadFile class.
@@ -222,6 +227,19 @@ def create_app(settings: Settings | None = None, *, start_worker: bool = True) -
                 mode = str(form.get("mode", settings.mode))
                 if mode not in {"auto", "gpu", "cpu"}:
                     raise HTTPException(422, "Unknown processing mode.")
+                effect = str(form.get("effect", "blur"))
+                if effect not in {"blur", "emoji"}:
+                    raise HTTPException(422, "Unknown face effect.")
+                if effect == "emoji":
+                    from veil.model import verify_expression_model
+
+                    if not await asyncio.to_thread(
+                        verify_expression_model, settings.expression_path
+                    ):
+                        raise HTTPException(
+                            503,
+                            "Expression model missing or invalid. Run 'veil init' on the server.",
+                        )
                 name = (file.filename or "video").replace("\\", "/").split("/")[-1]
                 name = "".join(c for c in name if c.isprintable())[:180] or "video"
                 if Path(name).suffix.lower() not in {".mp4", ".mov", ".m4v", ".mkv", ".webm"}:
@@ -245,7 +263,7 @@ def create_app(settings: Settings | None = None, *, start_worker: bool = True) -
                         raise HTTPException(422, "The video is empty.")
                     directory.mkdir(mode=0o700)
                     temporary.replace(directory / "source.bin")
-                    job = store.create(name, size, mode, job_id)
+                    job = store.create(name, size, mode, job_id, effect=effect)
                     manager.notify()
                     return job
                 except BaseException:
@@ -281,7 +299,8 @@ def create_app(settings: Settings | None = None, *, start_worker: bool = True) -
         output = store.directory(job_id) / "blurred.mp4"
         if job["status"] != "completed" or not output.is_file():
             raise HTTPException(409, "The export is not ready.")
-        filename = f"{Path(job['filename']).stem}-blurred.mp4"
+        suffix = "emoji" if job.get("effect", "blur") == "emoji" else "blurred"
+        filename = f"{Path(job['filename']).stem}-{suffix}.mp4"
         return FileResponse(
             output,
             media_type="video/mp4",

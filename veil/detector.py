@@ -7,13 +7,73 @@ The weights are MIT licensed; see docs/licenses/YuNet-MIT.txt.
 
 import json
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 import cv2
 import numpy as np
 import onnxruntime as ort
 
 from veil.model import verify_model
+
+
+class Landmarks(NamedTuple):
+    """YuNet order; right/left refer to the person, rather than the viewer."""
+
+    right_eye: tuple[float, float]
+    left_eye: tuple[float, float]
+    nose: tuple[float, float]
+    right_mouth: tuple[float, float]
+    left_mouth: tuple[float, float]
+
+
+@dataclass(frozen=True, slots=True)
+class Face:
+    box: tuple[float, float, float, float]
+    landmarks: Landmarks
+    score: float
+
+    @property
+    def bbox(self) -> tuple[float, float, float, float]:
+        return self.box
+
+
+def _create_session(model_path: Path, *, gpu: bool, size: int) -> ort.InferenceSession:
+    """Warm up the requested provider and require actual CUDA node execution."""
+    if gpu and "CUDAExecutionProvider" not in ort.get_available_providers():
+        raise RuntimeError("ONNX Runtime CUDA provider is not installed.")
+    if gpu and hasattr(ort, "preload_dlls"):
+        ort.preload_dlls(directory="")
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 2
+    options.inter_op_num_threads = 1
+    options.log_severity_level = 3
+    with tempfile.TemporaryDirectory(prefix="veil-ort-") as profiling:
+        if gpu:
+            options.enable_profiling = True
+            options.profile_file_prefix = str(Path(profiling) / "cuda")
+        providers = (
+            [
+                ("CUDAExecutionProvider", {"cudnn_conv_algo_search": "HEURISTIC"}),
+                "CPUExecutionProvider",
+            ]
+            if gpu
+            else ["CPUExecutionProvider"]
+        )
+        session = ort.InferenceSession(str(model_path), options, providers=providers)
+        session.disable_fallback()
+        if gpu and "CUDAExecutionProvider" not in session.get_providers():
+            raise RuntimeError("CUDA initialization failed; ONNX Runtime fell back to CPU.")
+        session.run(None, {session.get_inputs()[0].name: np.zeros((1, 3, size, size), np.float32)})
+        if gpu:
+            profile = Path(session.end_profiling())
+            events = json.loads(profile.read_text())
+            if not any(
+                e.get("args", {}).get("provider") == "CUDAExecutionProvider" for e in events
+            ):
+                raise RuntimeError("CUDA did not execute any model operations.")
+        return session
 
 
 class FaceDetector:
@@ -24,46 +84,22 @@ class FaceDetector:
             raise ValueError("YuNet model missing or checksum invalid. Run `veil init`.")
         self.threshold = threshold
         self.backend = "CUDA" if gpu else "CPU"
-        if gpu and "CUDAExecutionProvider" not in ort.get_available_providers():
-            raise RuntimeError("ONNX Runtime CUDA provider is not installed.")
-        if gpu and hasattr(ort, "preload_dlls"):
-            ort.preload_dlls(directory="")
-        options = ort.SessionOptions()
-        options.intra_op_num_threads = 2
-        options.inter_op_num_threads = 1
-        options.log_severity_level = 3
-        with tempfile.TemporaryDirectory(prefix="veil-ort-") as profiling:
-            if gpu:
-                options.enable_profiling = True
-                options.profile_file_prefix = str(Path(profiling) / "cuda")
-            providers = (
-                [
-                    ("CUDAExecutionProvider", {"cudnn_conv_algo_search": "HEURISTIC"}),
-                    "CPUExecutionProvider",
-                ]
-                if gpu
-                else ["CPUExecutionProvider"]
-            )
-            self.session = ort.InferenceSession(str(model_path), options, providers=providers)
-            self.session.disable_fallback()
-            if gpu and "CUDAExecutionProvider" not in self.session.get_providers():
-                raise RuntimeError("CUDA initialization failed; ONNX Runtime fell back to CPU.")
-            self.input_name = self.session.get_inputs()[0].name
-            shape = self.session.get_inputs()[0].shape
-            self.size = int(shape[2]) if isinstance(shape[2], int) else 640
-            self.output_names = [output.name for output in self.session.get_outputs()]
-            self.session.run(
-                None, {self.input_name: np.zeros((1, 3, self.size, self.size), np.float32)}
-            )
-            if gpu:
-                profile = Path(self.session.end_profiling())
-                events = json.loads(profile.read_text())
-                if not any(
-                    e.get("args", {}).get("provider") == "CUDAExecutionProvider" for e in events
-                ):
-                    raise RuntimeError("CUDA did not execute any model operations.")
+        self.session = _create_session(model_path, gpu=gpu, size=640)
+        self.input_name = self.session.get_inputs()[0].name
+        shape = self.session.get_inputs()[0].shape
+        self.size = int(shape[2]) if isinstance(shape[2], int) else 640
+        self.output_names = [output.name for output in self.session.get_outputs()]
 
     def detect(self, frame: np.ndarray) -> list[tuple[float, float, float, float]]:
+        """The existing blur path avoids landmark decoding and allocation."""
+        outputs, scale = self._predict(frame)
+        return decode_predictions(outputs, self.size, scale, self.threshold)
+
+    def detect_faces(self, frame: np.ndarray) -> list[Face]:
+        outputs, scale = self._predict(frame)
+        return decode_predictions(outputs, self.size, scale, self.threshold, rich=True)
+
+    def _predict(self, frame: np.ndarray) -> tuple[dict, float]:
         height, width = frame.shape[:2]
         scale = self.size / max(width, height)
         resized = cv2.resize(frame, (max(1, round(width * scale)), max(1, round(height * scale))))
@@ -74,16 +110,20 @@ class FaceDetector:
         outputs = dict(
             zip(self.output_names, self.session.run(None, {self.input_name: blob}), strict=True)
         )
-        return decode_predictions(outputs, self.size, scale, self.threshold)
+        return outputs, scale
 
 
-def decode_predictions(outputs: dict, size: int, scale: float, threshold: float) -> list:
+def decode_predictions(
+    outputs: dict, size: int, scale: float, threshold: float, *, rich: bool = False
+) -> list:
     boxes, scores = [], []
+    faces = [] if rich else None
     for stride in (8, 16, 32):
         cls = np.asarray(outputs[f"cls_{stride}"]).reshape(-1)
         obj = np.asarray(outputs[f"obj_{stride}"]).reshape(-1)
         score = np.sqrt(np.clip(cls, 0, 1) * np.clip(obj, 0, 1))
         bbox = np.asarray(outputs[f"bbox_{stride}"]).reshape(-1, 4)
+        kps = np.asarray(outputs[f"kps_{stride}"]).reshape(-1, 5, 2) if rich else None
         indices = np.flatnonzero(score >= threshold)
         for index in indices:
             row, col = divmod(int(index), size // stride)
@@ -98,9 +138,15 @@ def decode_predictions(outputs: dict, size: int, scale: float, threshold: float)
             if np.isfinite(box).all():
                 boxes.append(box)
                 scores.append(float(score[index]))
+                if rich:
+                    points = (kps[index] + np.array([col, row])) * stride / scale
+                    landmarks = Landmarks(*(tuple(map(float, point)) for point in points))
+                    faces.append(Face(tuple(box), landmarks, scores[-1]))
     if not boxes:
         return []
     keep = cv2.dnn.NMSBoxes(boxes, scores, threshold, 0.3, top_k=5000)
+    if rich:
+        return [faces[int(i)] for i in np.asarray(keep).reshape(-1)]
     return [tuple(boxes[int(i)]) for i in np.asarray(keep).reshape(-1)]
 
 

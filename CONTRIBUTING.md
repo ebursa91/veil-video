@@ -1,6 +1,6 @@
 # Contributing
 
-Use Python 3.12, uv, and a recent FFmpeg build. Keep changes focused and include tests for behavior that can break privacy, job state, or media handling.
+Use Python 3.12, uv, and a recent FFmpeg build.
 
 ```sh
 uv sync --locked --extra cpu --extra dev
@@ -9,15 +9,13 @@ uv run ruff format --check .
 uv run pytest
 ```
 
-For a manual run, use `uv run veil init` and `uv run veil serve`. Use synthetic or permissioned media. Do not commit uploaded videos, face images, `.env`, passwords, databases, model binaries, or generated exports.
+Run locally with `uv run veil init` and `uv run veil serve`. Use synthetic or permissioned test media. Keep private media, `.env`, credentials, databases, model binaries, and exports out of Git.
 
 Before opening a pull request:
 
-- Describe the user-visible behavior and how you verified it.
-- Include a regression test for a bug fix where practical.
-- Exercise upload, cancellation, deletion, and export if your change touches the pipeline.
-- Test GPU changes with a real GPU-mode job. CPU CI cannot establish CUDA or NVENC correctness.
-- Keep the UI keyboard accessible and usable on an iPhone-sized viewport.
-- Update the documentation when setup or limitations change.
+- Describe the change and its verification; add regression coverage for privacy, job state, and media handling.
+- For pipeline changes, check upload, cancellation, deletion, and export. Verify GPU changes with a real GPU-mode job; CPU CI cannot verify CUDA or NVENC.
+- Check UI changes with a keyboard and an iPhone-sized viewport.
+- Update setup instructions and limitations when they change.
 
-Veil deliberately has one user, one processing worker, and local files. New editing operations should fit the worker's progress/cancellation boundary. Avoid adding accounts, remote media fetches, analytics, or external services without a clear project decision.
+Keep the single-user design. New editing operations should use the worker's progress and cancellation interface. Discuss accounts, remote media, or external services before adding them.

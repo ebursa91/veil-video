@@ -1,6 +1,6 @@
 # Architecture
 
-Veil has one FastAPI process, one persistent SQLite job store, one background processing worker, and a static browser interface. There are no tenants, accounts, external queues, or cloud media services.
+Veil uses FastAPI, SQLite, one processing worker, and a static browser interface. Media stays on the host.
 
 ```mermaid
 flowchart LR
@@ -31,17 +31,17 @@ flowchart LR
 | `pipeline` | Frame processing, progress callbacks, encoding, cancellation, subprocess lifecycle. |
 | `static` | Accessible upload, progress, job actions, playback, and download. |
 
-The browser uploads a file; it cannot request an arbitrary file path or remote URL. The server gives it a generated job ID and keeps source files private. Output preview/download require a signed session and a completed job.
+Uploads receive generated job IDs. The API accepts files rather than paths or remote URLs. Sources stay private; preview and download require a valid session and a completed job.
 
-The worker runs one job at a time. It reports backend, stage, progress, processed frames, speed, and remaining-time estimates. Progress is an estimate; upload completion is separate from processing completion. SQLite keeps history across restarts. A process interrupted during processing cannot resume that encode; it becomes a failed job so the user can upload again.
+The worker processes one job at a time and reports backend, stage, frames, speed, progress, and estimated time remaining through SSE. The UI polls if SSE fails. Upload and processing progress are separate. SQLite preserves job history; an interrupted encode becomes a failed job and must be uploaded again.
 
-Every processed frame goes through detection. Expanded masks and a short tracking hold reduce visible gaps between detections. These measures do not establish that every face is hidden. In Auto mode, the pipeline may fall back and reports the backend it used. GPU mode requires both CUDA inference and NVENC encoding. CPU still handles decoding, masks, blur, and memory transfer.
+Every frame passes through YuNet detection, expanded face masks, and a short tracking hold. Detection can still miss faces. Automatic mode reports any fallback; GPU mode requires CUDA inference and NVENC encoding. Decoding, masks, blur, and memory transfer use the CPU.
 
-The app's source, local data, and runtime network behavior are separate boundaries. Initialization downloads the fixed YuNet artifact; upload processing uses that local model. App pages contain no external scripts, fonts, analytics, or CDNs. Outbound dependency installation and Tailscale control-plane traffic are outside the media-processing path.
+Initialization downloads the pinned model. Processing uses the local copy; the UI loads no remote assets or analytics. Dependency installation and Tailscale have their own network traffic.
 
 ## Extending video editing
 
-New processing features should operate inside the worker boundary and accept the same progress and cancellation signals. Keep the original upload immutable, write results to a temporary location, and only mark a job completed once the final output is ready. Keep external commands argument-based with no shell interpolation. Add fixture coverage for rotation, audio, variable frame rates, HDR conversion, failures, and cancellation when changing media handling.
+New operations use the worker's progress and cancellation interface. Preserve the original, write temporary output, and mark completion only after the final export is ready. Pass subprocess arguments without shell interpolation. Cover rotation, audio, variable frame rates, HDR, failures, and cancellation when changing media handling.
 
 ## Model provenance
 

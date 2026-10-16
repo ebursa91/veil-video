@@ -59,3 +59,31 @@ def test_password_rotation_invalidates_signed_sessions(settings):
     cookie, _ = Auth(settings).issue()
     rotated = replace(settings, password_hash=HASHER.hash("different long password"))
     assert Auth(rotated).read(cookie) is None
+
+
+def test_expression_model_path_follows_face_model_mount(settings):
+    from dataclasses import replace
+    from pathlib import Path
+
+    mounted = replace(settings, model_path=Path("/models/yunet.onnx"))
+    assert mounted.expression_path == Path("/models/expression.onnx")
+    overridden = replace(mounted, expression_model_path=Path("/other/expressions.onnx"))
+    assert overridden.expression_path == Path("/other/expressions.onnx")
+
+
+def test_init_prepares_both_models_without_resetting_configuration(tmp_path, settings, monkeypatch):
+    import veil.model
+
+    env = tmp_path / "existing.env"
+    env.write_text(
+        f"VEIL_PASSWORD_HASH='{settings.password_hash}'\nVEIL_SECRET_KEY='{settings.secret_key}'\n"
+    )
+    monkeypatch.setenv("VEIL_MODEL_PATH", str(tmp_path / "models/yunet.onnx"))
+    monkeypatch.delenv("VEIL_EXPRESSION_MODEL_PATH", raising=False)
+    prepared = []
+    monkeypatch.setattr(veil.model, "ensure_model", lambda path: prepared.append(path))
+    monkeypatch.setattr(veil.model, "ensure_expression_model", lambda path: prepared.append(path))
+    original = env.read_bytes()
+    initialize(env)
+    assert env.read_bytes() == original
+    assert prepared == [tmp_path / "models/yunet.onnx", tmp_path / "models/expression.onnx"]

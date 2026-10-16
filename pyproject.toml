@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "A private, self-hosted video workbench. Blur faces on your GPU."
 readme = "README.md"
 license = "MIT"
+license-files = ["LICENSE", "docs/licenses/*"]
 requires-python = ">=3.12,<3.14"
 dependencies = [
   "fastapi>=0.118,<1",

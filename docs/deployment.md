@@ -6,7 +6,7 @@
 - FFmpeg with H.264/AAC encoding and `zscale` / `tonemap` for HDR input.
 - GPU mode: a compatible NVIDIA driver and FFmpeg with `h264_nvenc`. The GPU extra supplies CUDA/cuDNN libraries. See [ONNX Runtime compatibility](https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html).
 
-Follow the [README setup](../README.md#setup). The model download requires internet access during initialization; processing then works offline. Run `veil doctor` to check inference and encoding support.
+Follow the [README setup](../README.md#setup). Model downloads require internet access during initialization; processing then works offline. Run `veil doctor` to check inference and encoding support. Existing installations can rerun `veil init` to install the expression model while retaining their password configuration.
 
 ## Configuration
 
@@ -18,6 +18,7 @@ The CLI loads `.env`; environment variables take precedence. Use `veil --env-fil
 | `VEIL_SECRET_KEY` | Required | Session secret created by `init`. |
 | `VEIL_DATA_DIR` | `data` | Media, temporary uploads, and job database. |
 | `VEIL_MODEL_PATH` | `models/yunet.onnx` | Verified local face model. |
+| `VEIL_EXPRESSION_MODEL_PATH` | `expression.onnx` beside the face model | Verified expression model for optional emoji covers. |
 | `VEIL_MAX_UPLOAD_GB` | `8` | Upload limit in GiB, from 1 to 100. |
 | `VEIL_MODE` | `auto` | `auto`, `gpu`, or `cpu`. |
 | `VEIL_HOST` | `127.0.0.1` | Listener address. |
@@ -27,6 +28,8 @@ The CLI loads `.env`; environment variables take precedence. Use `veil --env-fil
 | `VEIL_TRUSTED_PROXIES` | `127.0.0.1` | Proxy IPs trusted to supply forwarded headers. |
 
 `serve --host` and `--port` override listener settings. Run one server process per data directory. Auto mode reports any CPU fallback; GPU mode requires both CUDA inference and NVENC encoding. Decoding and masking use CPU.
+
+Blur remains available without the expression model. Emoji jobs require that model and add expression inference per detected face, so crowded clips can take longer. Model scores choose an approximate visible expression; they do not establish how someone feels. Overlays follow estimated face geometry, with blur underneath to cover tracking gaps. Small, obscured, or strongly turned faces can be missed or classified incorrectly; review the entire export.
 
 ## Private access
 

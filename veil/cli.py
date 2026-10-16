@@ -41,20 +41,28 @@ def initialize(env_file: Path, *, no_model: bool = False) -> None:
         load_dotenv(env_file)
         print(f"Configuration saved to {env_file} (owner access only).")
     if not no_model:
-        from veil.model import ensure_model
+        from veil.model import ensure_expression_model, ensure_model
 
         path = Path(os.environ.get("VEIL_MODEL_PATH", "models/yunet.onnx"))
         print("Preparing the pinned face detector…")
         ensure_model(path)
         print(f"Face model ready: {path}")
+        expression_path = Path(
+            os.environ.get("VEIL_EXPRESSION_MODEL_PATH", path.with_name("expression.onnx"))
+        )
+        print("Preparing the pinned expression model…")
+        ensure_expression_model(expression_path)
+        print(f"Expression model ready: {expression_path}")
     print("Start with: veil serve")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Veil: private GPU face blurring")
+    parser = argparse.ArgumentParser(description="Veil: private GPU face anonymization")
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     commands = parser.add_subparsers(dest="command", required=True)
-    init = commands.add_parser("init", help="Create password configuration and download face model")
+    init = commands.add_parser(
+        "init", help="Create password configuration and download face models"
+    )
     init.add_argument(
         "--no-model", action="store_true", help="Configure without downloading the model"
     )

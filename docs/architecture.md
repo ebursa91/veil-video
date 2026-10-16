@@ -14,7 +14,10 @@ flowchart LR
   Worker --> Decode[FFmpeg decode / normalize]
   Decode --> Detect[YuNet face inference]
   Detect --> Blur[Expanded face masks / blur]
-  Blur --> Encode[H.264 encode / audio mux]
+  Detect --> Expression[Optional expression inference]
+  Blur --> Emoji[Optional tracked emoji overlay]
+  Expression --> Emoji
+  Emoji --> Encode[H.264 encode / audio mux]
   Encode --> Disk
   Worker --> Store
 ```
@@ -27,7 +30,9 @@ flowchart LR
 | `auth`, `app` | Password login, signed sessions, CSRF, bounded upload and authenticated media access. |
 | `store`, `jobs` | Job state, persistent queue, one worker, cancellation, cleanup. |
 | `media` | FFprobe validation and media normalization information. |
-| `model`, `detector` | Pinned model download/checksum, CPU/CUDA inference, face boxes. |
+| `model`, `detector` | Pinned model download/checksum, CPU/CUDA inference, face boxes and five landmarks. |
+| `expression` | Aligned face crops and approximate expression classification for emoji selection. |
+| `emoji` | Procedural artwork, stable track variants, and smoothed landmark geometry. |
 | `pipeline` | Frame processing, progress callbacks, encoding, cancellation, subprocess lifecycle. |
 | `static` | Accessible upload, progress, job actions, playback, and download. |
 
@@ -39,7 +44,9 @@ Within a job, a single prefetch worker reads and detects the next frame while th
 
 Every frame passes through YuNet detection, expanded face masks, and a short tracking hold. Detection can still miss faces. Automatic mode reports any fallback; GPU mode requires CUDA inference and NVENC encoding. Decoding, masks, blur, and memory transfer use the CPU.
 
-Initialization downloads the pinned model. Processing uses the local copy; the UI loads no remote assets or analytics. Dependency installation and Tailscale have their own network traffic.
+Emoji jobs classify the original face crops before masking. The normal expanded blur is always applied before decorative overlays, including held masks during detection gaps. Tracks smooth expression and landmark changes and retain their artwork variant. At most 64 emoji tracks are kept; further detections remain blurred. Landmark pose is approximate 2D geometry, not a reconstructed 3D head.
+
+Initialization downloads the pinned models. Processing uses local copies; the UI loads no remote assets or analytics. Dependency installation and Tailscale have their own network traffic.
 
 ## Extending video editing
 
@@ -52,3 +59,7 @@ YuNet's `face_detection_yunet_2023mar.onnx` comes from [OpenCV Zoo at commit `47
 SHA-256: `8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4`.
 
 The [model's MIT notice](licenses/YuNet-MIT.txt) is retained in the repository. The model binary is downloaded during explicit initialization and excluded from source control.
+
+Emoji selection uses OpenCV Zoo's [MobileFaceNet expression model at the same pinned revision](https://github.com/opencv/opencv_zoo/tree/47534e27c9851bb1128ccc0102f1145e27f23f98/models/facial_expression_recognition), with its [Apache 2.0 notice](licenses/Expression-Apache-2.0.txt). Five landmarks align each crop to 112×112 pixels; the model selects among seven expression categories. These are approximate visual labels, not measurements of internal emotion.
+
+SHA-256: `4f61307602fc089ce20488a31d4e4614e3c9753a7d6c41578c854858b183e1a9`.

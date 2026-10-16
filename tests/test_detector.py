@@ -51,6 +51,33 @@ def test_yunet_prediction_coordinates_and_nms():
     assert boxes[0] == pytest.approx((8, 8, 16, 16))
 
 
+def test_rich_faces_preserve_boxes_scores_and_named_landmark_coordinates():
+    outputs = {}
+    for stride in (8, 16, 32):
+        count = (32 // stride) ** 2
+        outputs[f"cls_{stride}"] = np.zeros((1, count, 1), np.float32)
+        outputs[f"obj_{stride}"] = np.zeros((1, count, 1), np.float32)
+        outputs[f"bbox_{stride}"] = np.zeros((1, count, 4), np.float32)
+        outputs[f"kps_{stride}"] = np.zeros((1, count, 10), np.float32)
+    outputs["cls_8"][0, 5, 0] = 0.81
+    outputs["obj_8"][0, 5, 0] = 1
+    outputs["kps_8"][0, 5] = np.array(
+        [0.1, 0.2, 0.7, 0.2, 0.4, 0.4, 0.2, 0.7, 0.6, 0.7],
+        np.float32,
+    )
+    boxes = decode_predictions(outputs, 32, 0.5, 0.55)
+    faces = decode_predictions(outputs, 32, 0.5, 0.55, rich=True)
+    assert [face.box for face in faces] == boxes
+    face = faces[0]
+    assert face.bbox == face.box
+    assert face.score == pytest.approx(0.9)
+    assert face.landmarks.right_eye == pytest.approx((17.6, 19.2))
+    assert face.landmarks.left_eye == pytest.approx((27.2, 19.2))
+    assert face.landmarks.nose == pytest.approx((22.4, 22.4))
+    assert face.landmarks.right_mouth == pytest.approx((19.2, 27.2))
+    assert face.landmarks.left_mouth == pytest.approx((25.6, 27.2))
+
+
 def test_expanded_mask_changes_pixels_and_preserves_background():
     rng = np.random.default_rng(42)
     original = rng.integers(0, 256, (200, 300, 3), dtype=np.uint8)

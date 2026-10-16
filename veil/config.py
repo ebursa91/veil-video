@@ -22,6 +22,11 @@ class Settings:
     trusted_proxies: str = "127.0.0.1"
     host: str = "127.0.0.1"
     port: int = 8765
+    expression_model_path: Path | None = None
+
+    @property
+    def expression_path(self) -> Path:
+        return self.expression_model_path or self.model_path.with_name("expression.onnx")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -50,4 +55,7 @@ class Settings:
             trusted_proxies=os.environ.get("VEIL_TRUSTED_PROXIES", "127.0.0.1"),
             host=os.environ.get("VEIL_HOST", "127.0.0.1"),
             port=int(os.environ.get("VEIL_PORT", "8765")),
+            expression_model_path=Path(os.environ["VEIL_EXPRESSION_MODEL_PATH"]).resolve()
+            if os.environ.get("VEIL_EXPRESSION_MODEL_PATH")
+            else None,
         )

@@ -1,6 +1,8 @@
 import json
 import shutil
 import subprocess
+import threading
+import weakref
 
 import numpy as np
 import pytest
@@ -223,6 +225,99 @@ def test_auto_mode_reports_cpu_fallback(source, tmp_path, monkeypatch):
     )
     assert result["backend"] == "CPU + libx264"
     assert any("using CPU inference" in e.get("message", "") for e in events)
+
+
+def test_inference_overlaps_ordered_encoding(source, tmp_path, monkeypatch):
+    second_started = threading.Event()
+    release_second = threading.Event()
+    detected, written, references = [], [], []
+    read = pipeline._read_frame
+    write = pipeline._write_frame
+    read_count = 0
+
+    def indexed_read(*args):
+        nonlocal read_count
+        raw = read(*args)
+        if raw:
+            raw[0] = read_count
+            read_count += 1
+        return raw
+
+    class Detector(FakeDetector):
+        def detect(self, frame):
+            references.append(weakref.ref(frame))
+            assert sum(ref() is not None for ref in references) <= 2
+            index = int(frame[0, 0, 0])
+            detected.append(index)
+            if index == 1:
+                second_started.set()
+                assert release_second.wait(2)
+            return [(70 + index, 35, 30, 30)]
+
+    def ordered_write(pipe, buffer, cancelled):
+        if not written:
+            overlapped = second_started.wait(2)
+            release_second.set()
+            assert overlapped, "next inference should run before the current write completes"
+        written.append(int(buffer[0]))
+        return write(pipe, buffer, cancelled)
+
+    monkeypatch.setattr(pipeline, "FaceDetector", Detector)
+    monkeypatch.setattr(pipeline, "_read_frame", indexed_read)
+    monkeypatch.setattr(pipeline, "_write_frame", ordered_write)
+    try:
+        result = pipeline.process_video(
+            source,
+            tmp_path / "overlapped.mp4",
+            mode="cpu",
+            progress=lambda _: None,
+            cancelled=lambda: False,
+            model_path=source,
+        )
+    finally:
+        release_second.set()
+    assert detected == written == list(range(10))
+    assert result["frames_with_faces"] == result["frames_processed"] == 10
+
+
+def test_prefetched_inference_failure_reaps_processes_and_removes_export(
+    source,
+    tmp_path,
+    monkeypatch,
+):
+    processes = []
+    popen = pipeline.subprocess.Popen
+
+    def capture(*args, **kwargs):
+        process = popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    class Detector(FakeDetector):
+        calls = 0
+
+        def detect(self, frame):
+            self.calls += 1
+            if self.calls == 4:
+                raise RuntimeError("injected inference failure")
+            return super().detect(frame)
+
+    monkeypatch.setattr(pipeline.subprocess, "Popen", capture)
+    monkeypatch.setattr(pipeline, "FaceDetector", Detector)
+    output = tmp_path / "failed.mp4"
+    with pytest.raises(RuntimeError, match="injected inference failure"):
+        pipeline.process_video(
+            source,
+            output,
+            mode="cpu",
+            progress=lambda _: None,
+            cancelled=lambda: False,
+            model_path=source,
+        )
+    assert not output.exists()
+    assert not list(tmp_path.glob(".veil-*"))
+    assert all(process.poll() is not None for process in processes)
+    assert not any(t.name.startswith("veil-prefetch") for t in threading.enumerate())
 
 
 def test_hevc_10bit_hdr_is_tone_mapped_to_sdr(tmp_path, monkeypatch):

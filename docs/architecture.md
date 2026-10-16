@@ -35,6 +35,8 @@ Uploads receive generated job IDs. The API accepts files rather than paths or re
 
 The worker processes one job at a time and reports backend, stage, frames, speed, progress, and estimated time remaining through SSE. The UI polls if SSE fails. Upload and processing progress are separate. SQLite preserves job history; an interrupted encode becomes a failed job and must be uploaded again.
 
+Within a job, a single prefetch worker reads and detects the next frame while the current frame is masked and encoded. Tracking and output stay in source order. Only one next frame is buffered; large frames use the serial path when two BGR buffers would exceed 128 MiB. FFmpeg decode and filter threads are bounded by available CPU resources.
+
 Every frame passes through YuNet detection, expanded face masks, and a short tracking hold. Detection can still miss faces. Automatic mode reports any fallback; GPU mode requires CUDA inference and NVENC encoding. Decoding, masks, blur, and memory transfer use the CPU.
 
 Initialization downloads the pinned model. Processing uses the local copy; the UI loads no remote assets or analytics. Dependency installation and Tailscale have their own network traffic.

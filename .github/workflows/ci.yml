@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Python 3.12 / CPU
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      VEIL_TEST_MODEL: .ci-model/yunet.onnx
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.12.20"
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install dependencies
+        run: uv sync --locked --extra cpu --extra dev
+      - name: Lint
+        run: uv run ruff check .
+      - name: Check formatting
+        run: uv run ruff format --check .
+      - name: Prepare verified inference model
+        run: uv run python -c "import os; from pathlib import Path; from veil.model import ensure_model; ensure_model(Path(os.environ['VEIL_TEST_MODEL']))"
+      - name: Test
+        run: uv run pytest

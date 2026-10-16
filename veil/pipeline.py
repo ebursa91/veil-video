@@ -1,12 +1,16 @@
 """Streaming face blur jobs with bounded memory and cancellable FFmpeg pipes."""
 
+import fcntl
 import os
 import selectors
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -17,6 +21,23 @@ from veil.media import INPUT_FORMATS, decode_filter, probe
 
 class CancelledError(Exception):
     """A job was cancelled; partial output has been removed."""
+
+
+def _decode_threads() -> tuple[int, int]:
+    try:
+        available = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        available = os.cpu_count() or 1
+    return min(4, max(1, available // 2)), min(8, max(1, available))
+
+
+def _buffer_pipe(pipe) -> None:
+    # Larger video frames need many writes through a default small Linux pipe.
+    # This is only an optimization; restricted hosts can keep their default.
+    try:
+        fcntl.fcntl(pipe.fileno(), fcntl.F_SETPIPE_SZ, 1024**2)
+    except (OSError, AttributeError):
+        pass
 
 
 def _nvenc_check() -> tuple[bool, str]:
@@ -103,7 +124,7 @@ def _check_cancel(cancelled: Callable[[], bool]) -> None:
         raise CancelledError("Job cancelled.")
 
 
-def _read_frame(pipe, length: int, cancelled: Callable[[], bool]) -> bytes:
+def _read_frame(pipe, length: int, cancelled: Callable[[], bool]) -> bytearray:
     chunks = bytearray()
     deadline = time.monotonic() + 120
     with selectors.DefaultSelector() as selector:
@@ -121,13 +142,13 @@ def _read_frame(pipe, length: int, cancelled: Callable[[], bool]) -> bytes:
             if not chunk:
                 if chunks:
                     raise RuntimeError("FFmpeg returned an incomplete video frame.")
-                return b""
+                return chunks
             chunks.extend(chunk)
             deadline = time.monotonic() + 120
-    return bytes(chunks)
+    return chunks
 
 
-def _write_frame(pipe, data: bytes, cancelled: Callable[[], bool]) -> None:
+def _write_frame(pipe, data: bytes | bytearray | memoryview, cancelled: Callable[[], bool]) -> None:
     view = memoryview(data)
     deadline = time.monotonic() + 120
     with selectors.DefaultSelector() as selector:
@@ -144,6 +165,55 @@ def _write_frame(pipe, data: bytes, cancelled: Callable[[], bool]) -> None:
                 continue
             view = view[written:]
             deadline = time.monotonic() + 120
+
+
+@contextmanager
+def _prefetch_frames(read_and_detect, cancelled: Callable[[], bool], *, enabled: bool = True):
+    """Overlap one next frame with the ordered tracker/blur/writer.
+
+    The worker owns its frame until inference returns. Only the consuming thread
+    calls the public cancellation callback, mutates masks, or writes output.
+    """
+    abort = threading.Event()
+
+    def serial_frames():
+        while True:
+            _check_cancel(cancelled)
+            item = read_and_detect(cancelled)
+            if item is None:
+                return
+            yield item
+
+    if not enabled:
+        yield serial_frames()
+        return
+
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="veil-prefetch")
+    pending = None
+
+    def frames():
+        nonlocal pending
+        while True:
+            _check_cancel(cancelled)
+            ready, _ = wait([pending], timeout=0.2)
+            if not ready:
+                continue
+            item = pending.result()  # Read/inference failures abort the export.
+            _check_cancel(cancelled)
+            if item is None:
+                return
+            pending = executor.submit(read_and_detect, abort.is_set)
+            yield item
+
+    try:
+        pending = executor.submit(read_and_detect, abort.is_set)
+        yield frames()
+    finally:
+        # A prefetched read may be blocked on the pipe when the writer fails.
+        abort.set()
+        if pending is not None:
+            pending.cancel()
+        executor.shutdown(wait=True, cancel_futures=True)
 
 
 def _wait(process: subprocess.Popen, cancelled: Callable[[], bool], timeout: int = 300) -> None:
@@ -171,9 +241,17 @@ def process_video(
     progress: Callable[[dict], None],
     cancelled: Callable[[], bool],
     model_path: Path,
+    prefetch: bool = True,
+    decode_threads: int | None = None,
+    filter_threads: int | None = None,
 ) -> dict:
     if mode not in {"auto", "gpu", "cpu"}:
         raise ValueError("Processing mode must be auto, gpu or cpu.")
+    default_decode, default_filter = _decode_threads()
+    decode_threads = default_decode if decode_threads is None else decode_threads
+    filter_threads = default_filter if filter_threads is None else filter_threads
+    if not 1 <= decode_threads <= 32 or not 1 <= filter_threads <= 32:
+        raise ValueError("Decode and filter thread counts must be between 1 and 32.")
     source, output = Path(source).resolve(), Path(output).resolve()
     if source == output or output.exists():
         raise ValueError("Output must be a new file distinct from the source.")
@@ -222,9 +300,9 @@ def process_video(
                     "-nostdin",
                     "-xerror",
                     "-threads",
-                    "2",
+                    str(decode_threads),
                     "-filter_threads",
-                    "2",
+                    str(filter_threads),
                     "-protocol_whitelist",
                     "file,pipe",
                     "-format_whitelist",
@@ -302,6 +380,8 @@ def process_video(
                 )
                 os.set_blocking(decoder.stdout.fileno(), False)
                 os.set_blocking(encoder.stdin.fileno(), False)
+                _buffer_pipe(decoder.stdout)
+                _buffer_pipe(encoder.stdin)
                 progress(
                     {
                         "stage": "detecting",
@@ -313,37 +393,49 @@ def process_video(
                         or "Detecting faces and encoding masked frames.",
                     }
                 )
-                while True:
-                    raw = _read_frame(decoder.stdout, width * height * 3, cancelled)
+
+                def read_and_detect(check_cancel):
+                    raw = _read_frame(decoder.stdout, width * height * 3, check_cancel)
                     if not raw:
-                        break
-                    # Protect disk/time use if a corrupt container lies about duration.
-                    if frame_count > (4 * 60 * 60 + 1) * fps:
-                        raise ValueError("Decoded video exceeds the four-hour limit.")
-                    frame = np.frombuffer(raw, np.uint8).reshape(height, width, 3).copy()
-                    boxes = detector.detect(frame)
-                    masks = tracker.update(boxes)
-                    if masks:
-                        face_count += 1
-                        blur_faces(frame, masks)
-                    _write_frame(encoder.stdin, frame.tobytes(), cancelled)
-                    frame_count += 1
-                    now = time.monotonic()
-                    if now - last_update >= 0.3:
-                        speed = frame_count / max(0.001, now - started)
-                        progress(
-                            {
-                                "stage": "detecting",
-                                "progress": min(96, 1 + frame_count / total * 95),
-                                "frames_processed": frame_count,
-                                "total_frames": total,
-                                "fps": round(speed, 1),
-                                "eta_seconds": max(0, round((total - frame_count) / speed)),
-                                "backend": backend,
-                                "message": "Detecting faces and encoding masked frames.",
-                            }
-                        )
-                        last_update = now
+                        return None
+                    _check_cancel(check_cancel)
+                    # The returned array owns the writable bytearray through its
+                    # buffer reference; no full-frame copy or shared scratch buffer.
+                    frame = np.frombuffer(raw, np.uint8).reshape(height, width, 3)
+                    return frame, detector.detect(frame)
+
+                # At most the current and next frame are retained. Large frames
+                # stay serial when two BGR buffers would exceed 128 MiB.
+                overlap = prefetch and width * height * 3 * 2 <= 128 * 1024**2
+                with _prefetch_frames(read_and_detect, cancelled, enabled=overlap) as frames:
+                    for frame, boxes in frames:
+                        if frame_count > (4 * 60 * 60 + 1) * fps:
+                            raise ValueError("Decoded video exceeds the four-hour limit.")
+                        masks = tracker.update(boxes)
+                        if masks:
+                            face_count += 1
+                            blur_faces(frame, masks)
+                        _write_frame(encoder.stdin, memoryview(frame).cast("B"), cancelled)
+                        frame_count += 1
+                        now = time.monotonic()
+                        if now - last_update >= 0.3:
+                            speed = frame_count / max(0.001, now - started)
+                            progress(
+                                {
+                                    "stage": "detecting",
+                                    "progress": min(96, 1 + frame_count / total * 95),
+                                    "frames_processed": frame_count,
+                                    "total_frames": total,
+                                    "fps": round(speed, 1),
+                                    "eta_seconds": max(0, round((total - frame_count) / speed)),
+                                    "backend": backend,
+                                    "message": "Detecting faces and encoding masked frames.",
+                                }
+                            )
+                            last_update = now
+                        # Release the caller's frame before the generator starts
+                        # another lookahead; otherwise three frames can coexist.
+                        del frame, boxes
                 _wait(decoder, cancelled)
                 encoder.stdin.close()
                 progress(

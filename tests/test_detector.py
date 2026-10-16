@@ -7,6 +7,36 @@ from veil.detector import FaceDetector, MaskTracker, blur_faces, decode_predicti
 from veil.model import verify_model
 
 
+@pytest.mark.parametrize("height,width", [(16, 32), (32, 16), (32, 32)])
+def test_detector_input_is_contiguous_nchw_with_unchanged_channels_and_padding(height, width):
+    detector = FaceDetector.__new__(FaceDetector)
+    detector.size, detector.threshold, detector.input_name = 32, 0.55, "input"
+    outputs = {}
+    for stride in (8, 16, 32):
+        count = (detector.size // stride) ** 2
+        outputs[f"cls_{stride}"] = np.zeros((1, count, 1), np.float32)
+        outputs[f"obj_{stride}"] = np.zeros((1, count, 1), np.float32)
+        outputs[f"bbox_{stride}"] = np.zeros((1, count, 4), np.float32)
+    detector.output_names = list(outputs)
+    captured = []
+
+    class RecordingSession:
+        def run(self, output_names, inputs):
+            captured.append(inputs["input"])
+            return list(outputs.values())
+
+    detector.session = RecordingSession()
+    frame = np.arange(height * width * 3, dtype=np.uint8).reshape(height, width, 3)
+    assert detector.detect(frame) == []
+    blob = captured[0]
+    assert blob.dtype == np.float32
+    assert blob.flags.c_contiguous
+    expected = np.zeros((1, 3, detector.size, detector.size), np.float32)
+    for channel in range(3):
+        expected[0, channel, :height, :width] = frame[:, :, channel]
+    np.testing.assert_array_equal(blob, expected)
+
+
 def test_yunet_prediction_coordinates_and_nms():
     outputs = {}
     for stride in (8, 16, 32):

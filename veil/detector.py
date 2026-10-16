@@ -69,7 +69,8 @@ class FaceDetector:
         resized = cv2.resize(frame, (max(1, round(width * scale)), max(1, round(height * scale))))
         image = np.zeros((self.size, self.size, 3), np.uint8)
         image[: resized.shape[0], : resized.shape[1]] = resized
-        blob = image.transpose(2, 0, 1)[None].astype(np.float32)
+        # Pack NCHW here so ONNX Runtime does not copy strided HWC storage again.
+        blob = image.transpose(2, 0, 1)[None].astype(np.float32, order="C")
         outputs = dict(
             zip(self.output_names, self.session.run(None, {self.input_name: blob}), strict=True)
         )

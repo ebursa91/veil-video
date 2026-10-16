@@ -4,7 +4,7 @@ from dataclasses import replace
 from fastapi.testclient import TestClient
 
 from veil.app import create_app
-from veil.jobs import JobManager
+from veil.jobs import JobManager, PreviewSnapshot
 from veil.store import Store
 
 
@@ -25,6 +25,7 @@ def test_auth_protects_all_private_routes_before_body_parse(client):
         "/api/events",
         "/api/jobs/invalid/preview",
         "/api/jobs/invalid/download",
+        "/api/jobs/invalid/live-preview",
     ):
         assert client.get(path).status_code == 401
     assert client.post("/api/jobs", content=b"x" * 100).status_code == 401
@@ -85,6 +86,32 @@ def test_download_is_range_capable(signed_in, settings):
     assert response.content == b"2345"
     assert "inline" in response.headers["content-disposition"]
     assert "attachment" in signed_in.get(path + "/download").headers["content-disposition"]
+
+
+def test_live_preview_only_serves_active_processed_snapshot(signed_in, settings):
+    job = upload(signed_in).json()
+    path = f"/api/jobs/{job['id']}/live-preview"
+    manager = signed_in.app.state.manager
+    store = Store(settings.data_dir)
+    assert signed_in.get(path).status_code == 204
+    assert signed_in.get("/api/jobs/unknown/live-preview").status_code == 404
+    store.update(job["id"], status="processing")
+    assert signed_in.get(path).status_code == 204
+    jpeg = b"\xff\xd8processed thumbnail\xff\xd9"
+    manager._previews[job["id"]] = PreviewSnapshot(jpeg, 31, 1.0)
+    response = signed_in.get(path + "?frame=1")
+    assert response.status_code == 200
+    assert response.content == jpeg
+    assert response.headers["content-type"] == "image/jpeg"
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-preview-frame"] == "31"
+    assert float(response.headers["x-preview-time"]) == 1
+    for status in ("completed", "cancelled", "failed", "queued"):
+        store.update(job["id"], status=status)
+        assert signed_in.get(path).status_code == 204
+    store.update(job["id"], status="failed")
+    assert signed_in.delete(f"/api/jobs/{job['id']}").status_code == 200
+    assert not manager._previews
 
 
 def test_upload_validation_and_limits(signed_in, settings):
@@ -174,11 +201,12 @@ def test_queue_capacity(signed_in):
 def test_worker_restart_marks_interrupted_failed(settings):
     store = Store(settings.data_dir)
     job = store.create("interrupted.mov", 20, "cpu")
-    store.update(job["id"], status="processing")
+    store.update(job["id"], status="processing", preview_frame=30, preview_time=1.0)
     manager = JobManager(settings, store)
     manager.start()
     manager.stop()
     assert store.get(job["id"])["status"] == "failed"
+    assert store.get(job["id"])["preview_frame"] is None
 
 
 def test_worker_calls_pipeline_and_persists_result(settings, monkeypatch):

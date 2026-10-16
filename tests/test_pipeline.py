@@ -234,6 +234,7 @@ def test_inference_overlaps_ordered_encoding(source, tmp_path, monkeypatch):
     read = pipeline._read_frame
     write = pipeline._write_frame
     read_count = 0
+    previews = []
 
     def indexed_read(*args):
         nonlocal read_count
@@ -273,11 +274,80 @@ def test_inference_overlaps_ordered_encoding(source, tmp_path, monkeypatch):
             progress=lambda _: None,
             cancelled=lambda: False,
             model_path=source,
+            preview=lambda *values: previews.append(values),
         )
     finally:
         release_second.set()
     assert detected == written == list(range(10))
     assert result["frames_with_faces"] == result["frames_processed"] == 10
+    assert previews[0][1:] == (1, 0)
+    assert previews[-1][1:] == (10, 0.9)
+    assert not any(reference() is not None for reference in references)
+
+
+def test_default_pipeline_does_not_initialize_preview(source, tmp_path, monkeypatch):
+    def no_preview(*args, **kwargs):
+        pytest.fail("Preview must not initialize or encode when its callback is absent")
+
+    monkeypatch.setattr(pipeline, "ProcessedPreview", no_preview)
+    result = run_pipeline(source, tmp_path / "no-preview.mp4", monkeypatch)
+    assert result["frames_processed"] == 10
+
+
+def test_preview_observes_masked_frames_only_after_successful_write(source, tmp_path, monkeypatch):
+    import cv2
+
+    written, emitted = [], []
+    write = pipeline._write_frame
+
+    def blur(frame, boxes):
+        frame[:] = (0, 0, 220)
+
+    def record_write(*args):
+        write(*args)
+        written.append(True)
+
+    def preview(jpeg, frame_no, timestamp):
+        assert len(written) == frame_no
+        decoded = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+        assert decoded[:, :, 2].mean() > 210
+        assert decoded[:, :, :2].mean() < 5
+        assert timestamp == pytest.approx((frame_no - 1) / 10)
+        emitted.append(frame_no)
+
+    monkeypatch.setattr(pipeline, "blur_faces", blur)
+    monkeypatch.setattr(pipeline, "_write_frame", record_write)
+    result = run_pipeline(source, tmp_path / "preview.mp4", monkeypatch, preview=preview)
+    assert result["frames_processed"] == 10
+    assert emitted[0] == 1 and emitted[-1] == 10
+
+
+def test_preview_callback_failure_does_not_fail_export(source, tmp_path, monkeypatch):
+    calls = []
+
+    def fail(*args):
+        calls.append(True)
+        raise RuntimeError("preview storage unavailable")
+
+    output = tmp_path / "preview-failed.mp4"
+    result = run_pipeline(source, output, monkeypatch, preview=fail)
+    assert result["frames_processed"] == 10
+    assert output.exists()
+    assert calls == [True]
+
+
+def test_failed_write_does_not_publish_a_preview(source, tmp_path, monkeypatch):
+    emitted = []
+
+    def fail(*args):
+        raise RuntimeError("injected write failure")
+
+    monkeypatch.setattr(pipeline, "_write_frame", fail)
+    output = tmp_path / "write-failed.mp4"
+    with pytest.raises(RuntimeError, match="injected write failure"):
+        run_pipeline(source, output, monkeypatch, preview=lambda *args: emitted.append(args))
+    assert not emitted
+    assert not output.exists()
 
 
 def test_prefetched_inference_failure_reaps_processes_and_removes_export(
@@ -496,6 +566,8 @@ def test_iphone_240fps_slow_motion_is_accepted(tmp_path, monkeypatch):
 
 
 def test_emoji_classifies_original_then_draws_over_blur(source, tmp_path, monkeypatch):
+    import cv2
+
     from veil import emoji
     from veil.detector import Face, Landmarks
 
@@ -522,7 +594,19 @@ def test_emoji_classifies_original_then_draws_over_blur(source, tmp_path, monkey
         def update(self, faces, expressions):
             return ["overlay"]
 
-    drawn = []
+    drawn, written, previews = [], [], []
+    write = pipeline._write_frame
+
+    def record_write(*args):
+        write(*args)
+        written.append(True)
+
+    def preview(jpeg, frame_no, timestamp):
+        assert len(written) == len(drawn) == frame_no
+        image = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+        assert image[55:60, 90:95, 1:].mean() > 180
+        assert timestamp == pytest.approx((frame_no - 1) / 10)
+        previews.append(frame_no)
 
     def draw(frame, overlays):
         assert overlays == ["overlay"]
@@ -536,6 +620,7 @@ def test_emoji_classifies_original_then_draws_over_blur(source, tmp_path, monkey
     monkeypatch.setattr(pipeline, "ExpressionClassifier", Classifier)
     monkeypatch.setattr(emoji, "EmojiTracker", Tracker)
     monkeypatch.setattr(emoji, "draw_emojis", draw)
+    monkeypatch.setattr(pipeline, "_write_frame", record_write)
     output = tmp_path / "emoji.mp4"
     result = pipeline.process_video(
         source,
@@ -545,11 +630,13 @@ def test_emoji_classifies_original_then_draws_over_blur(source, tmp_path, monkey
         model_path=source,
         progress=lambda _: None,
         cancelled=lambda: False,
+        preview=preview,
     )
     assert result["effect"] == "emoji"
     assert len(drawn) == result["frames_with_faces"] == result["frames_processed"] == 10
     assert probe(output)["has_audio"]
     assert frames(output)[:, 55:60, 90:95, 1:].mean() > 180
+    assert previews[0] == 1 and previews[-1] == 10
 
 
 @pytest.mark.parametrize("failure", ["classifier", "renderer"])

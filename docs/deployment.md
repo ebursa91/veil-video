@@ -31,6 +31,8 @@ The CLI loads `.env`; environment variables take precedence. Use `veil --env-fil
 
 Blur remains available without the expression model. Emoji jobs require that model and add expression inference per detected face, so crowded clips can take longer. Model scores choose an approximate visible expression; they do not establish how someone feels. Overlays follow estimated face geometry, with blur underneath to cover tracking gaps. Small, obscured, or strongly turned faces can be missed or classified incorrectly; review the entire export.
 
+During processing, live previews show small processed snapshots about once a second. Hide the preview to stop image requests; requests also pause in background tabs. These snapshots supplement progress updates; review the completed video before sharing.
+
 ## Private access
 
 Keep Veil on loopback and configure [Tailscale Serve](https://tailscale.com/docs/reference/tailscale-cli/serve):

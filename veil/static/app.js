@@ -1,5 +1,7 @@
 "use strict";
 
+import { LivePreview } from "./live-preview.mjs";
+
 (() => {
   const $ = (id) => document.getElementById(id);
   const state = {
@@ -87,6 +89,7 @@
     stopUpdates();
     if (state.upload) state.upload.abort();
     for (const card of state.cards.values()) {
+      card.liveController.dispose();
       card.video.pause();
       card.video.removeAttribute("src");
       card.video.load();
@@ -237,7 +240,39 @@
       message: find(".job-message"), error: find(".job-error"), backend: find(".job-backend"),
       cancel: find(".job-cancel"), remove: find(".job-delete"), previewToggle: find(".job-preview-toggle"),
       download: find(".job-download"), preview: find(".job-preview"), video: find(".result-video"), data: null,
+      live: find(".job-live-preview"), liveBody: find(".live-preview-body"),
+      liveImage: find(".live-preview-image"), liveToggle: find(".live-preview-toggle"),
+      liveTime: find(".live-preview-time"), livePlaceholder: find(".live-preview-placeholder"),
+      liveCaption: find(".live-preview-caption"),
     };
+    card.liveImage.alt = `Processed ${job.effect === "emoji" ? "face emoji" : "blurred"} preview`;
+    card.liveBody.id = `live-preview-${job.id}`;
+    card.liveToggle.setAttribute("aria-controls", card.liveBody.id);
+    card.liveToggle.setAttribute("aria-label", `Hide live preview for ${job.filename || "video"}`);
+    card.liveController = new LivePreview({
+      endpoint: jobUrl(job.id, "live-preview"),
+      onUnauthorized: () => showLogin("Your session expired. Enter your password to continue."),
+      onImage: (url, snapshot) => {
+        card.liveImage.hidden = !url;
+        if (url) card.liveImage.src = url;
+        else card.liveImage.removeAttribute("src");
+        card.liveTime.textContent = snapshot?.time !== null && snapshot?.time !== undefined ? `Processed ${duration(Math.floor(snapshot.time))}` : "";
+        card.livePlaceholder.hidden = Boolean(url);
+      },
+      onStatus: (status) => {
+        card.livePlaceholder.textContent = status === "unavailable" ? "Preview temporarily unavailable" : status === "waiting" ? "Waiting for a processed frame…" : "Loading processed frame…";
+        card.liveCaption.textContent = status === "unavailable" ? "Processing continues. The preview will update when available." : "Processed snapshots. Review the full export before sharing.";
+      },
+    });
+    card.liveToggle.addEventListener("click", () => {
+      const enabled = !card.liveController.enabled;
+      card.liveBody.hidden = !enabled;
+      card.liveToggle.textContent = enabled ? "Hide preview" : "Show preview";
+      card.liveToggle.setAttribute("aria-expanded", String(enabled));
+      card.liveToggle.setAttribute("aria-label", `${enabled ? "Hide" : "Show"} live preview for ${card.data?.filename || "video"}`);
+      card.liveController.setEnabled(enabled);
+    });
+    card.liveImage.addEventListener("error", () => card.liveController.imageFailed());
     card.cancel.addEventListener("click", () => mutateJob(job.id, "cancel"));
     card.remove.addEventListener("click", () => mutateJob(job.id, "delete"));
     card.previewToggle.addEventListener("click", () => {
@@ -279,6 +314,8 @@
       if (media.width && media.height) metadata.push(`${media.width} × ${media.height}`);
       card.meta.textContent = metadata.filter(Boolean).join(" · ");
       card.status.textContent = statuses[job.status] || "Updating";
+      card.live.hidden = job.status !== "processing" || !Number.isSafeInteger(job.preview_frame) || job.preview_frame < 0;
+      card.liveController.update(job);
       const active = !terminal.has(job.status);
       card.processing.hidden = !active;
       const progress = percentage(job.progress);
@@ -324,6 +361,7 @@
     }
     for (const [id, card] of state.cards) {
       if (!present.has(id)) {
+        card.liveController.dispose();
         card.video.pause();
         card.video.removeAttribute("src");
         card.video.load();
@@ -505,7 +543,10 @@
   window.addEventListener("drop", (event) => event.preventDefault());
   window.addEventListener("online", () => { if (state.authenticated) { startUpdates(); loadJobs(); loadSystem(); } });
   window.addEventListener("offline", () => { if (state.authenticated) connection("Offline", "offline"); });
-  document.addEventListener("visibilitychange", () => { if (!document.hidden && state.authenticated) loadJobs(); });
+  document.addEventListener("visibilitychange", () => {
+    for (const card of state.cards.values()) card.liveController.visibilityChanged();
+    if (!document.hidden && state.authenticated) loadJobs();
+  });
   window.addEventListener("beforeunload", (event) => { if (state.upload) { event.preventDefault(); event.returnValue = ""; } });
 
   (async () => {

@@ -18,6 +18,7 @@ import numpy as np
 from veil.detector import FaceDetector, MaskTracker, blur_faces
 from veil.expression import ExpressionClassifier
 from veil.media import INPUT_FORMATS, decode_filter, probe
+from veil.preview import PreviewCallback, ProcessedPreview
 
 
 class CancelledError(Exception):
@@ -244,6 +245,7 @@ def process_video(
     model_path: Path,
     effect: str = "blur",
     expression_model_path: Path | None = None,
+    preview: PreviewCallback | None = None,
     prefetch: bool = True,
     decode_threads: int | None = None,
     filter_threads: int | None = None,
@@ -310,6 +312,8 @@ def process_video(
     )
     width, height, fps = media["width"], media["height"], media["fps"]
     total = max(1, round(media["duration"] * fps))
+    previewer = ProcessedPreview(preview, fps) if preview is not None else None
+    decode_finished = threading.Event() if previewer is not None else None
     tracker = MaskTracker(fps)
     frame_count = face_count = 0
     decoder = encoder = muxer = None
@@ -425,6 +429,8 @@ def process_video(
                 def read_and_detect(check_cancel):
                     raw = _read_frame(decoder.stdout, width * height * 3, check_cancel)
                     if not raw:
+                        if decode_finished is not None:
+                            decode_finished.set()
                         return None
                     _check_cancel(check_cancel)
                     # The returned array owns the writable bytearray through its
@@ -460,6 +466,16 @@ def process_video(
                         _write_frame(encoder.stdin, memoryview(frame).cast("B"), cancelled)
                         frame_count += 1
                         now = time.monotonic()
+                        if previewer is not None:
+                            # Encoding accepted this fully affected frame. EOF
+                            # lookahead or an exact container count also allows a
+                            # final snapshot without retaining the raw last frame.
+                            previewer.emit(
+                                frame,
+                                frame_count,
+                                now=now,
+                                force=frame_count == total or decode_finished.is_set(),
+                            )
                         if now - last_update >= 0.3:
                             speed = frame_count / max(0.001, now - started)
                             progress(

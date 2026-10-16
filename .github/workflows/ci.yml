@@ -46,5 +46,5 @@ jobs:
           PY
       - name: Test
         run: uv run pytest
-      - name: Test live preview controller
-        run: node --test tests/test_live_preview.mjs
+      - name: Test browser controllers
+        run: node --test tests/*.mjs

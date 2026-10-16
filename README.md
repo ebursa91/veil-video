@@ -7,6 +7,7 @@ Self-hosted face blurring and emoji covers for video. Upload a clip, track progr
 - Uses CUDA face detection and NVENC encoding when available; CPU mode is supported.
 - Exports SDR H.264/AAC video. HDR is converted to SDR; source metadata is removed.
 - Includes a persistent queue, live processed previews, cancellation, download, and deletion.
+- Removes finished video files after seven days by default and keeps job history.
 - Stores media locally. No telemetry or cloud processing.
 
 **Review exports before sharing.** Detection can miss faces; audio and other identifying details remain.

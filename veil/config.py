@@ -23,6 +23,7 @@ class Settings:
     host: str = "127.0.0.1"
     port: int = 8765
     expression_model_path: Path | None = None
+    retention_days: int = 7
 
     @property
     def expression_path(self) -> Path:
@@ -43,6 +44,9 @@ class Settings:
         maximum = int(os.environ.get("VEIL_MAX_UPLOAD_GB", "8"))
         if not 1 <= maximum <= 100:
             raise ValueError("VEIL_MAX_UPLOAD_GB must be between 1 and 100.")
+        retention = int(os.environ.get("VEIL_RETENTION_DAYS", "7"))
+        if not 1 <= retention <= 365:
+            raise ValueError("VEIL_RETENTION_DAYS must be between 1 and 365.")
         return cls(
             data_dir=Path(os.environ.get("VEIL_DATA_DIR", "data")).resolve(),
             model_path=Path(os.environ.get("VEIL_MODEL_PATH", "models/yunet.onnx")).resolve(),
@@ -58,4 +62,5 @@ class Settings:
             expression_model_path=Path(os.environ["VEIL_EXPRESSION_MODEL_PATH"]).resolve()
             if os.environ.get("VEIL_EXPRESSION_MODEL_PATH")
             else None,
+            retention_days=retention,
         )

@@ -10,6 +10,7 @@ services:
       VEIL_MODEL_PATH: /models/yunet.onnx
       VEIL_SECURE_COOKIE: ${VEIL_SECURE_COOKIE:-false}
       VEIL_ORIGIN: ${VEIL_ORIGIN:-}
+      VEIL_RETENTION_DAYS: ${VEIL_RETENTION_DAYS:-7}
       NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
     volumes:
       - config:/config

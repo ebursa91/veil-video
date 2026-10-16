@@ -87,3 +87,23 @@ def test_init_prepares_both_models_without_resetting_configuration(tmp_path, set
     initialize(env)
     assert env.read_bytes() == original
     assert prepared == [tmp_path / "models/yunet.onnx", tmp_path / "models/expression.onnx"]
+
+
+@pytest.mark.parametrize("days", ["0", "-1", "366", "invalid"])
+def test_retention_configuration_rejects_invalid_days(settings, monkeypatch, days):
+    monkeypatch.setattr("veil.config.load_dotenv", lambda: None)
+    monkeypatch.setenv("VEIL_PASSWORD_HASH", settings.password_hash)
+    monkeypatch.setenv("VEIL_SECRET_KEY", settings.secret_key)
+    monkeypatch.setenv("VEIL_RETENTION_DAYS", days)
+    with pytest.raises(ValueError):
+        Settings.from_env()
+
+
+def test_retention_configuration_defaults_and_override(settings, monkeypatch):
+    monkeypatch.setattr("veil.config.load_dotenv", lambda: None)
+    monkeypatch.setenv("VEIL_PASSWORD_HASH", settings.password_hash)
+    monkeypatch.setenv("VEIL_SECRET_KEY", settings.secret_key)
+    monkeypatch.delenv("VEIL_RETENTION_DAYS", raising=False)
+    assert Settings.from_env().retention_days == 7
+    monkeypatch.setenv("VEIL_RETENTION_DAYS", "30")
+    assert Settings.from_env().retention_days == 30

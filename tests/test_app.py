@@ -1,9 +1,12 @@
+import asyncio
 import time
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 
+import pytest
 from fastapi.testclient import TestClient
 
-from veil.app import create_app
+from veil.app import RetainedFileResponse, create_app
 from veil.jobs import JobManager, PreviewSnapshot
 from veil.store import Store
 
@@ -86,6 +89,61 @@ def test_download_is_range_capable(signed_in, settings):
     assert response.content == b"2345"
     assert "inline" in response.headers["content-disposition"]
     assert "attachment" in signed_in.get(path + "/download").headers["content-disposition"]
+
+
+def test_expired_and_archived_exports_are_gone_even_before_cleanup(
+    signed_in, settings, monkeypatch
+):
+    job = upload(signed_in).json()
+    store = Store(settings.data_dir)
+    (store.directory(job["id"]) / "blurred.mp4").write_bytes(b"processed file")
+    store.update(job["id"], status="completed")
+    path = f"/api/jobs/{job['id']}"
+    assert signed_in.get(path + "/download").status_code == 200
+    future = datetime.now(UTC) + timedelta(days=8)
+    monkeypatch.setattr("veil.retention.utc_time", lambda: future)
+    assert signed_in.get(path + "/download").status_code == 410
+    assert signed_in.get(path + "/preview").status_code == 410
+    assert signed_in.get(path).json()["status"] == "completed"
+    signed_in.app.state.manager.collect_retention()
+    assert signed_in.get(path).json()["status"] == "archived"
+    assert signed_in.get(path + "/download").status_code == 410
+    assert signed_in.get(path).status_code == 200
+
+
+def test_download_lease_survives_expiry_and_releases_on_disconnect(settings, monkeypatch):
+    store = Store(settings.data_dir)
+    job = store.create("export.mov", 10, "cpu")
+    directory = store.directory(job["id"])
+    directory.mkdir()
+    (directory / "source.bin").write_bytes(b"original")
+    output = directory / "blurred.mp4"
+    output.write_bytes(b"processed export")
+    store.update(job["id"], status="completed")
+    manager = JobManager(settings, store)
+    future = datetime.now(UTC) + timedelta(days=8)
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            monkeypatch.setattr("veil.retention.utc_time", lambda: future)
+            manager.collect_retention()
+            assert output.exists()
+            assert store.get(job["id"])["status"] == "completed"
+        if message["type"] == "http.response.body":
+            raise RuntimeError("client disconnected")
+
+    response = RetainedFileResponse(output, manager=manager, job_id=job["id"])
+    with pytest.raises(RuntimeError, match="client disconnected"):
+        asyncio.run(
+            response(
+                {"type": "http", "method": "GET", "headers": [], "asgi": {"spec_version": "2.4"}},
+                None,
+                send,
+            )
+        )
+    manager.collect_retention()
+    assert store.get(job["id"])["status"] == "archived"
+    assert not directory.exists()
 
 
 def test_live_preview_only_serves_active_processed_snapshot(signed_in, settings):

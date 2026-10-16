@@ -21,6 +21,7 @@ The CLI loads `.env`; environment variables take precedence. Use `veil --env-fil
 | `VEIL_EXPRESSION_MODEL_PATH` | `expression.onnx` beside the face model | Verified expression model for optional emoji covers. |
 | `VEIL_MAX_UPLOAD_GB` | `8` | Upload limit in GiB, from 1 to 100. |
 | `VEIL_MODE` | `auto` | `auto`, `gpu`, or `cpu`. |
+| `VEIL_RETENTION_DAYS` | `7` | Finished media lifetime in whole days, from 1 to 365. |
 | `VEIL_HOST` | `127.0.0.1` | Listener address. |
 | `VEIL_PORT` | `8765` | Listener port. |
 | `VEIL_SECURE_COOKIE` | `false` | Set `true` for HTTPS. |
@@ -82,6 +83,10 @@ Use the exact origin from `tailscale serve status`. App credentials remain in th
 
 Uploads: MOV, MP4, M4V, MKV, or WebM; up to four hours, 240 fps, 8,192 pixels per edge, and 33,177,600 total pixels. NVENC output supports widths of 144–4,096 and heights of 64–4,096 pixels. Auto mode uses CPU encoding outside those bounds; GPU mode fails.
 
-Jobs remain until deleted. Allow several times the source size in free disk space. Interrupted jobs must be uploaded again. Stop Veil before backing up SQLite; backups of media and `.env` contain private data.
+Finished jobs keep their source and export for seven days by default, then become archived history. The filename, outcome, dates, and basic job summary remain; Delete history removes that record. Queued and processing jobs never expire. Each finished job shows its deadline. Changing `VEIL_RETENTION_DAYS` affects future completions; existing deadlines stay fixed. Finished jobs from older versions receive a full retention period on the first upgraded startup.
+
+Cleanup runs at startup and periodically. New playback and download requests stop at the deadline; a response already transferring may finish before its files are removed. Unreferenced upload fragments and job directories are collected after 24 hours. Removal uses ordinary filesystem deletion, without secure erasure, and does not affect backups.
+
+Allow several times the source size in free disk space. Interrupted jobs must be uploaded again. Stop Veil before backing up SQLite; backups of media and `.env` contain private data.
 
 For updates, stop Veil, update the checkout, sync the selected dependency extra, run `veil doctor`, and restart. For Docker, rebuild and recreate without removing volumes.

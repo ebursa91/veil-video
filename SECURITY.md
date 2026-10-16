@@ -4,7 +4,7 @@ Keep Veil on a private tailnet with a strong, unique app password and restricted
 
 Uploads are untrusted input to FFmpeg and the detector. Run as an unprivileged user and keep dependencies, the GPU driver, and the host updated. Docker drops capabilities and uses a read-only root filesystem; it is not a strong sandbox for hostile media.
 
-Protect the data directory, credentials, and backups. Jobs remain until deleted. Deletion removes the job record and its files through ordinary filesystem deletion, without secure erasure.
+Protect the data directory, credentials, and backups. Finished media expires after seven days by default; archived history retains the filename and job summary until deleted. Automatic and manual deletion use ordinary filesystem removal, without secure erasure. Existing backups are unaffected.
 
 Face detection can miss people. Exports retain audio and other identifying content. Review the complete video before sharing; Veil does not guarantee anonymization.
 

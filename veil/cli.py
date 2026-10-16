@@ -37,6 +37,7 @@ def initialize(env_file: Path, *, no_model: bool = False) -> None:
                 f"VEIL_SECRET_KEY='{secret_key}'\n"
                 "VEIL_DATA_DIR=data\nVEIL_MODEL_PATH=models/yunet.onnx\n"
                 "VEIL_MODE=auto\nVEIL_MAX_UPLOAD_GB=8\nVEIL_SECURE_COOKIE=false\n"
+                "VEIL_RETENTION_DAYS=7\n"
             )
         load_dotenv(env_file)
         print(f"Configuration saved to {env_file} (owner access only).")

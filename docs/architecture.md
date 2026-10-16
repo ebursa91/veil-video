@@ -29,6 +29,7 @@ flowchart LR
 | `config`, `cli` | Explicit initialization, environment loading, launch, capability checks. |
 | `auth`, `app` | Password login, signed sessions, CSRF, bounded upload and authenticated media access. |
 | `store`, `jobs` | Job state, persistent queue, one worker, cancellation, cleanup. |
+| `retention` | Finished-media expiry, archived history, and stale upload cleanup. |
 | `media` | FFprobe validation and media normalization information. |
 | `model`, `detector` | Pinned model download/checksum, CPU/CUDA inference, face boxes and five landmarks. |
 | `expression` | Aligned face crops and approximate expression classification for emoji selection. |
@@ -39,6 +40,8 @@ flowchart LR
 Uploads receive generated job IDs. The API accepts files rather than paths or remote URLs. Sources stay private; edited snapshots and finished exports require a valid session.
 
 The worker processes one job at a time and reports backend, stage, frames, speed, progress, and estimated time remaining through SSE. The UI polls if SSE fails. Upload and processing progress are separate. SQLite preserves job history; an interrupted encode becomes a failed job and must be uploaded again.
+
+Terminal transitions set stable completion and expiry timestamps. Retention removes the job's media before replacing it with an archived summary; failures retry without discarding history. Startup migration gives older finished jobs a full grace period after the worker lease is acquired. Cleanup shares a lifecycle lock with uploads and media responses, skips active jobs and transfers, and uses directory descriptors for contained deletion. Only recognized, unreferenced remnants older than 24 hours qualify as orphans.
 
 After a fully affected frame is written to the encoder pipe, an optional callback captures a JPEG at most 640 pixels per edge, throttled to about once a second. Only the latest JPEG stays in application memory; SQLite stores its frame number and video timestamp. An authenticated, uncached endpoint serves it while the job is processing. Cancellation and terminal states clear the snapshot. The browser limits image requests to one at a time and pauses them when hidden.
 

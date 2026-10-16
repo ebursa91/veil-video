@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import secrets
 import shutil
 import tempfile
@@ -16,10 +17,12 @@ from pydantic import BaseModel, Field
 
 from veil.auth import COOKIE, Auth
 from veil.config import Settings
-from veil.jobs import JobManager
+from veil.jobs import JobManager, MediaUnavailableError
+from veil.retention import remove_job_media, remove_upload_part
 from veil.store import Store
 
 STATIC = Path(__file__).parent / "static"
+log = logging.getLogger(__name__)
 
 
 class Login(BaseModel):
@@ -28,6 +31,23 @@ class Login(BaseModel):
 
 class BodyTooLarge(Exception):
     pass
+
+
+class RetainedFileResponse(FileResponse):
+    """Keep automatic cleanup from removing a file during playback/download."""
+
+    def __init__(self, *args, manager: JobManager, job_id: str, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.manager, self.job_id = manager, job_id
+
+    async def __call__(self, scope, receive, send):
+        try:
+            with self.manager.track_media(self.job_id):
+                await super().__call__(scope, receive, send)
+        except MediaUnavailableError:
+            await JSONResponse({"detail": "Video files have expired or been archived."}, 410)(
+                scope, receive, send
+            )
 
 
 class RequestGuard:
@@ -93,7 +113,7 @@ class RequestGuard:
 def create_app(settings: Settings | None = None, *, start_worker: bool = True) -> FastAPI:
     settings = settings or Settings.from_env()
     settings.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    store = Store(settings.data_dir)
+    store = Store(settings.data_dir, retention_days=settings.retention_days)
     manager = JobManager(settings, store)
     auth = Auth(settings)
     upload_lock = asyncio.Lock()
@@ -197,6 +217,7 @@ def create_app(settings: Settings | None = None, *, start_worker: bool = True) -
             "max_upload_bytes": settings.max_upload_bytes,
             "model_ready": settings.model_path.is_file(),
             "default_mode": settings.mode,
+            "retention_days": settings.retention_days,
             "emoji_ready": await asyncio.to_thread(
                 verify_expression_model, settings.expression_path
             ),
@@ -250,26 +271,30 @@ def create_app(settings: Settings | None = None, *, start_worker: bool = True) -
                 temporary = staging / f"{job_id}.part"
                 directory = store.directory(job_id)
                 size = 0
-                try:
-                    with temporary.open("xb") as target:
-                        while chunk := await file.read(1024 * 1024):
-                            size += len(chunk)
-                            if size > settings.max_upload_bytes:
-                                raise HTTPException(413, "Video exceeds the upload limit.")
-                            if shutil.disk_usage(staging).free < len(chunk) + 256 * 1024**2:
-                                raise HTTPException(507, "Not enough free disk space.")
-                            await asyncio.to_thread(target.write, chunk)
-                    if not size:
-                        raise HTTPException(422, "The video is empty.")
-                    directory.mkdir(mode=0o700)
-                    temporary.replace(directory / "source.bin")
-                    job = store.create(name, size, mode, job_id, effect=effect)
-                    manager.notify()
-                    return job
-                except BaseException:
-                    temporary.unlink(missing_ok=True)
-                    shutil.rmtree(directory, ignore_errors=True)
-                    raise
+                with manager.track_upload(job_id):
+                    try:
+                        with temporary.open("xb") as target:
+                            while chunk := await file.read(1024 * 1024):
+                                size += len(chunk)
+                                if size > settings.max_upload_bytes:
+                                    raise HTTPException(413, "Video exceeds the upload limit.")
+                                if shutil.disk_usage(staging).free < len(chunk) + 256 * 1024**2:
+                                    raise HTTPException(507, "Not enough free disk space.")
+                                await asyncio.to_thread(target.write, chunk)
+                        if not size:
+                            raise HTTPException(422, "The video is empty.")
+                        directory.mkdir(mode=0o700)
+                        temporary.replace(directory / "source.bin")
+                        job = store.create(name, size, mode, job_id, effect=effect)
+                        manager.notify()
+                        return job
+                    except BaseException:
+                        for cleanup in (remove_upload_part, remove_job_media):
+                            try:
+                                cleanup(store, job_id)
+                            except OSError as exc:
+                                log.warning("Upload cleanup will retry (%s).", type(exc).__name__)
+                        raise
 
     @app.get("/api/jobs/{job_id}")
     def job_info(job_id: str):
@@ -312,12 +337,16 @@ def create_app(settings: Settings | None = None, *, start_worker: bool = True) -
     def download(job_id: str, request: Request):
         job = get_job(job_id)
         output = store.directory(job_id) / "blurred.mp4"
+        if job["status"] == "archived":
+            raise HTTPException(410, "Video files have expired or been archived.")
         if job["status"] != "completed" or not output.is_file():
             raise HTTPException(409, "The export is not ready.")
         suffix = "emoji" if job.get("effect", "blur") == "emoji" else "blurred"
         filename = f"{Path(job['filename']).stem}-{suffix}.mp4"
-        return FileResponse(
+        return RetainedFileResponse(
             output,
+            manager=manager,
+            job_id=job_id,
             media_type="video/mp4",
             filename=filename,
             content_disposition_type="inline"

@@ -1,6 +1,7 @@
 "use strict";
 
 import { LivePreview } from "./live-preview.mjs";
+import { releaseVideo, retentionLabel, retentionNotice } from "./retention.mjs";
 
 (() => {
   const $ = (id) => document.getElementById(id);
@@ -18,8 +19,8 @@ import { LivePreview } from "./live-preview.mjs";
     busyJobs: new Set(),
     preferredModeApplied: false,
   };
-  const terminal = new Set(["completed", "failed", "cancelled"]);
-  const statuses = { queued: "Queued", processing: "Processing", completed: "Ready to review", failed: "Failed", cancelled: "Cancelled" };
+  const terminal = new Set(["completed", "failed", "cancelled", "archived"]);
+  const statuses = { queued: "Queued", processing: "Processing", completed: "Ready to review", failed: "Failed", cancelled: "Cancelled", archived: "Archived" };
   const stages = { probing: "Reading video", detecting: "Finding & blurring faces", encoding: "Encoding MP4", finalizing: "Finishing your video" };
   const modeHelp = { auto: "Uses GPU acceleration when available, with CPU fallback.", gpu: "Requires GPU face detection and NVIDIA video encoding.", cpu: "Processes entirely on the CPU. Usually takes longer." };
   const effectHelp = { blur: "Expanded blur masks cover detected faces.", emoji: "Emojis follow position, tilt, and estimated expression. Blur stays underneath." };
@@ -90,14 +91,14 @@ import { LivePreview } from "./live-preview.mjs";
     if (state.upload) state.upload.abort();
     for (const card of state.cards.values()) {
       card.liveController.dispose();
-      card.video.pause();
-      card.video.removeAttribute("src");
-      card.video.load();
+      releaseVideo(card.video);
       card.node.remove();
     }
     state.cards.clear();
     state.jobs = [];
     state.system = null;
+    $("retention-notice").textContent = "";
+    $("retention-notice").hidden = true;
     state.preferredModeApplied = false;
     document.querySelector('input[name="effect"][value="blur"]').checked = true;
     $("effect-help").textContent = effectHelp.blur;
@@ -131,6 +132,8 @@ import { LivePreview } from "./live-preview.mjs";
       const system = await api("/api/system");
       if (!state.authenticated) return;
       state.system = system;
+      $("retention-notice").textContent = retentionNotice(system.retention_days);
+      $("retention-notice").hidden = !$("retention-notice").textContent;
       const gpu = Boolean(system.gpu_available);
       const encoder = Boolean(system.nvenc_available);
       $("hardware-status").textContent = gpu && encoder ? "GPU acceleration ready" : gpu ? "GPU detection · CPU encoding" : encoder ? "CPU detection · GPU encoding available" : "CPU processing available";
@@ -162,6 +165,7 @@ import { LivePreview } from "./live-preview.mjs";
     } catch (error) {
       if (!state.authenticated) return;
       state.system = null;
+      $("retention-notice").hidden = true;
       $("hardware-status").textContent = "Couldn’t check this machine";
       $("hardware-description").textContent = "Refresh to check acceleration and upload availability.";
       showError(error.message);
@@ -238,6 +242,7 @@ import { LivePreview } from "./live-preview.mjs";
       processing: find(".job-processing"), stage: find(".job-stage"), percent: find(".job-percent"),
       progress: find(".job-progress"), frames: find(".job-frames"), eta: find(".job-eta"),
       message: find(".job-message"), error: find(".job-error"), backend: find(".job-backend"),
+      retention: find(".job-retention"),
       cancel: find(".job-cancel"), remove: find(".job-delete"), previewToggle: find(".job-preview-toggle"),
       download: find(".job-download"), preview: find(".job-preview"), video: find(".result-video"), data: null,
       live: find(".job-live-preview"), liveBody: find(".live-preview-body"),
@@ -314,8 +319,13 @@ import { LivePreview } from "./live-preview.mjs";
       if (media.width && media.height) metadata.push(`${media.width} × ${media.height}`);
       card.meta.textContent = metadata.filter(Boolean).join(" · ");
       card.status.textContent = statuses[job.status] || "Updating";
+      const archived = job.status === "archived";
+      card.retention.textContent = retentionLabel(job);
+      card.retention.hidden = !card.retention.textContent;
       card.live.hidden = job.status !== "processing" || !Number.isSafeInteger(job.preview_frame) || job.preview_frame < 0;
-      card.liveController.update(job);
+      if (archived) {
+        if (!card.liveController.disposed) card.liveController.dispose();
+      } else card.liveController.update(job);
       const active = !terminal.has(job.status);
       card.processing.hidden = !active;
       const progress = percentage(job.progress);
@@ -329,8 +339,8 @@ import { LivePreview } from "./live-preview.mjs";
       if (Number(job.fps) > 0 && job.status === "processing") frameDetails.push(`${Number(job.fps).toFixed(1)} fps`);
       card.frames.textContent = frameDetails.join(" · ");
       card.eta.textContent = job.eta_seconds !== null && Number(job.eta_seconds) > 0 ? `About ${duration(job.eta_seconds)} left` : "";
-      card.message.textContent = job.message || "";
-      card.message.hidden = !job.message || job.status === "failed" || job.message.toLowerCase() === card.status.textContent.toLowerCase();
+      card.message.textContent = archived ? "Video files removed automatically." : job.message || "";
+      card.message.hidden = !archived && (!job.message || job.status === "failed" || job.message.toLowerCase() === card.status.textContent.toLowerCase());
       card.error.textContent = job.error || (job.status === "failed" ? "Processing failed. Upload the video again to retry." : "");
       card.error.hidden = !card.error.textContent;
       card.backend.textContent = job.backend || (job.status === "queued" ? `${{ auto: "Automatic", gpu: "GPU", cpu: "CPU" }[job.mode] || "Automatic"} processing` : "");
@@ -341,17 +351,19 @@ import { LivePreview } from "./live-preview.mjs";
       card.cancel.setAttribute("aria-label", `Cancel processing ${job.filename || "video"}`);
       card.remove.hidden = active;
       card.remove.disabled = busy;
-      card.remove.textContent = busy && !active ? "Deleting…" : "Delete";
-      card.remove.setAttribute("aria-label", `Delete ${job.filename || "video"} and its files`);
+      card.remove.textContent = busy && !active ? "Deleting…" : archived ? "Delete history" : "Delete";
+      card.remove.setAttribute("aria-label", archived ? `Delete history for ${job.filename || "video"}` : `Delete ${job.filename || "video"} and its files`);
       card.download.hidden = job.status !== "completed";
       card.previewToggle.hidden = job.status !== "completed";
-      card.download.href = jobUrl(job.id, "download");
+      if (job.status === "completed") card.download.href = jobUrl(job.id, "download");
+      else card.download.removeAttribute("href");
       card.download.setAttribute("aria-label", `Download ${job.effect === "emoji" ? "face emoji" : "blurred"} edit of ${job.filename || "video"} as MP4`);
       card.previewToggle.setAttribute("aria-label", `Review ${job.effect === "emoji" ? "face emoji" : "blurred"} edit of ${job.filename || "video"}`);
-      if (job.status !== "completed" && !card.preview.hidden) {
-        card.video.pause();
+      if (job.status !== "completed") {
+        releaseVideo(card.video);
         card.preview.hidden = true;
         card.previewToggle.setAttribute("aria-expanded", "false");
+        card.previewToggle.querySelector("span").textContent = "Review video";
       }
       // Existing elements keep their video playback and keyboard focus as progress arrives.
       const targetIndex = Array.from(present).length - 1;
@@ -362,9 +374,7 @@ import { LivePreview } from "./live-preview.mjs";
     for (const [id, card] of state.cards) {
       if (!present.has(id)) {
         card.liveController.dispose();
-        card.video.pause();
-        card.video.removeAttribute("src");
-        card.video.load();
+        releaseVideo(card.video);
         card.node.remove();
         state.cards.delete(id);
       }
@@ -373,13 +383,14 @@ import { LivePreview } from "./live-preview.mjs";
 
   async function mutateJob(id, action) {
     if (state.busyJobs.has(id)) return;
-    if (action === "delete" && !window.confirm("Delete this video and all its files? This cannot be undone.")) return;
+    const archived = state.cards.get(id)?.data?.status === "archived";
+    if (action === "delete" && !window.confirm(archived ? "Delete this job from history? This cannot be undone." : "Delete this video and all its files? This cannot be undone.")) return;
     state.busyJobs.add(id);
     renderJobs(state.jobs);
     try {
       await api(jobUrl(id, action === "cancel" ? "cancel" : ""), { method: action === "cancel" ? "POST" : "DELETE" });
       await loadJobs();
-      announce(action === "cancel" ? "Cancellation requested." : "Video and its files deleted.");
+      announce(action === "cancel" ? "Cancellation requested." : archived ? "Job removed from history." : "Video and its files deleted.");
     } catch (error) { if (state.authenticated) showError(error.message); }
     finally {
       state.busyJobs.delete(id);
